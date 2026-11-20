@@ -1,9 +1,10 @@
 # Libas VMS — CCTV Integration Status & Log
 
-Last updated: 2026-11-20 (Phase 2 Updated; Phase 5A Started)
+Last updated: 2026-11-20 (Phase 5A Design Complete)
 
 ## Current Status
-- **Active Phase**: Phase 5A — Multi-Vendor Adapter Architecture Design (In Progress; STOP at 5A design deliverable).
+- **Active Phase**: Phase 5A Complete — Adapter Architecture Design document delivered (`docs/cctv/05-adapter-architecture.md`).
+- **Next Phase**: Phase 5B — Data model & additive migration plan (Awaiting approval to begin 5B).
 - **CP Plus Cloud (`CP PLUS HQ`, `2EGCNCI2R12QERBG`)**: **BLOCKED (awaiting client info)**.
   - Reason: `admin` is a cloud login with no local credentials available `[USER]`. No public, documented API/SDK exists for InstaOnCloud P2P streaming `[DOC: https://www.cpplusworld.com/sdk]`. Unofficial/reverse-engineered P2P is forbidden.
   - Required from user: LAN IP, local device credentials, or official distributor SDK.
@@ -17,7 +18,9 @@ Last updated: 2026-11-20 (Phase 2 Updated; Phase 5A Started)
 3. **Database Isolation**: All operations restricted strictly to PostgreSQL schema `DATABASE_SCHEMA` (`vms`). No access to `public` or other schemas.
 4. **Pass-Through Architecture**: The server does not store recordings. Video passes through MediaMTX memory to WebRTC (WHEP) / HLS.
 5. **Multi-Vendor Adapter Separation**: Protocol separated from Brand (e.g. Brand = "Tyco / Holis", Adapter = "hikvision-isapi").
-6. **CP Plus Cloud Verdict**: BLOCKED (awaiting client info). Any CP Plus LAN adapter is treated as unverified.
+6. **Capability-Gated UI**: UI components inspect capability booleans (`capabilities.ptz`, `capabilities.rtspPlayback`, etc.) instead of branching on brand names.
+7. **Zero Behavior Change for Hikvision/Tyco**: `hikvision-isapi` adapter wraps `isapi.ts` directly, preserving digest caching, queue serialization, clock drift correction, and 30-minute auth lockout.
+8. **CP Plus Cloud Verdict**: BLOCKED (awaiting client info). Any CP Plus LAN adapter is treated as unverified.
 
 ---
 
@@ -38,3 +41,4 @@ Last updated: 2026-11-20 (Phase 2 Updated; Phase 5A Started)
    - Local device administrator username/password (distinct from cloud account).
    - Official enterprise SDK from CP Plus distributor (if obtainable).
 2. **Existing Estate Clarification**: Are there any additional physical Hikvision or Tyco devices on the network not yet added to the database?
+3. **Phase 5A Design Review**: Approval to proceed to Phase 5B (Data Model and Additive Migration proposal).
