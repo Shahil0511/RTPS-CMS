@@ -1,0 +1,336 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   Design tokens: Atlassian/Jira-style neutral palette, compact density.
+   --------------------------------------------------------------------------- */
+:root {
+  --bg: #f7f8f9;
+  --surface: #ffffff;
+  --surface-2: #f1f2f4;
+  --surface-hover: #e9ebee;
+  --border: #dcdfe4;
+  --border-strong: #b3b9c4;
+  --text: #172b4d;
+  --text-muted: #44546f;
+  --text-faint: #626f86;
+  --accent: #0c66e4;
+  --accent-hover: #0055cc;
+  --accent-soft: #e9f2ff;
+  --success: #1f845a;
+  --success-soft: #dcfff1;
+  --danger: #c9372c;
+  --danger-soft: #ffeceb;
+  --warning: #a54800;
+  --warning-soft: #fff7d6;
+  --info: #206a83;
+  --info-soft: #e7f9ff;
+  --sidebar: #ffffff;
+  --sidebar-text: #44546f;
+  --sidebar-active: #e9f2ff;
+  --brand-panel: #0747a6;
+  --timeline-bg: #22272b;
+  --ring: rgba(12, 102, 228, 0.35);
+  --shadow: 0 1px 1px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31);
+  --shadow-raised: 0 8px 12px rgba(9, 30, 66, 0.15), 0 0 1px rgba(9, 30, 66, 0.31);
+  --radius: 8px;
+
+  /* Chart roles (online/offline use blue/red: green/red fails colour-blind checks). */
+  --chart-1: #0c66e4;
+  --chart-2: #6e5dc6;
+  --chart-online: #0c66e4;
+  --chart-offline: #c9372c;
+  --chart-offline-soft: #ffeceb;
+  --chart-unknown: #8590a2;
+  --chart-muted: #dcdfe4;
+  --chart-grid: #ebecf0;
+}
+
+.dark {
+  --bg: #161a1d;
+  --surface: #22272b;
+  --surface-2: #2c333a;
+  --surface-hover: #333c43;
+  --border: #38414a;
+  --border-strong: #454f59;
+  --text: #b6c2cf;
+  --text-muted: #9fadbc;
+  --text-faint: #8c9bab;
+  --accent: #579dff;
+  --accent-hover: #85b8ff;
+  --accent-soft: #1c2b41;
+  --success: #4bce97;
+  --success-soft: #1c3329;
+  --danger: #f87168;
+  --danger-soft: #42221f;
+  --warning: #f5cd47;
+  --warning-soft: #332e1b;
+  --info: #9dd9ee;
+  --info-soft: #1e3137;
+  --sidebar: #1d2125;
+  --sidebar-text: #9fadbc;
+  --sidebar-active: #1c2b41;
+  --brand-panel: #09326c;
+  --timeline-bg: #101214;
+  --ring: rgba(87, 157, 255, 0.4);
+  --shadow: 0 0 0 1px rgba(188, 214, 240, 0.04), 0 1px 1px rgba(3, 4, 4, 0.5);
+  --shadow-raised: 0 0 0 1px rgba(188, 214, 240, 0.04), 0 8px 12px rgba(3, 4, 4, 0.36);
+
+  --chart-1: #388bff;
+  --chart-2: #9f8fef;
+  --chart-online: #388bff;
+  --chart-offline: #e2483d;
+  --chart-offline-soft: #42221f;
+  --chart-unknown: #738496;
+  --chart-muted: #38414a;
+  --chart-grid: #2c333a;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-text: var(--sidebar-text);
+  --color-sidebar-active: var(--sidebar-active);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius-card: var(--radius);
+  --shadow-card: var(--shadow);
+  --shadow-raised: var(--shadow-raised);
+}
+
+* {
+  border-color: var(--border);
+}
+
+html {
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.43;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.video-tile {
+  aspect-ratio: 16 / 9;
+  background: #000;
+}
+
+/* ---------------------------------------------------------------------------
+   Motion. Short, purposeful, and disabled for users who ask for less motion.
+   --------------------------------------------------------------------------- */
+:root {
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Every interactive control eases its colour/shadow changes and gives a press response. */
+:where(button, a, [role="button"], [role="tab"], select, input[type="checkbox"]) {
+  transition:
+    background-color 150ms var(--ease-out),
+    border-color 150ms var(--ease-out),
+    color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out),
+    opacity 150ms var(--ease-out),
+    transform 120ms var(--ease-out);
+}
+:where(button:not(:disabled), [role="button"], [role="tab"]):active {
+  transform: scale(0.97);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-in {
+  animation: fade-in 180ms var(--ease-out) both;
+}
+
+/* Page enter (src/app/(app)/template.tsx re-mounts on each navigation). */
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.page-enter {
+  animation: page-enter 240ms var(--ease-out) both;
+}
+/* Direct children cascade in one after another. */
+.page-enter > * {
+  animation: page-enter 280ms var(--ease-out) both;
+}
+.page-enter > *:nth-child(2) { animation-delay: 30ms; }
+.page-enter > *:nth-child(3) { animation-delay: 60ms; }
+.page-enter > *:nth-child(4) { animation-delay: 90ms; }
+.page-enter > *:nth-child(5) { animation-delay: 120ms; }
+.page-enter > *:nth-child(6) { animation-delay: 150ms; }
+.page-enter > *:nth-child(n + 7) { animation-delay: 180ms; }
+
+/* Dialogs and popovers scale in from 96%. */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.pop-in {
+  animation: pop-in 160ms var(--ease-out) both;
+  transform-origin: top right;
+}
+dialog[open] {
+  animation: pop-in 200ms var(--ease-spring) both;
+  transform-origin: center;
+}
+dialog::backdrop {
+  background: rgba(9, 30, 66, 0.54);
+  animation: backdrop-in 200ms var(--ease-out) both;
+}
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Toasts slide in from the right. */
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.slide-in {
+  animation: slide-in 220ms var(--ease-spring) both;
+}
+
+/* Raised hover for clickable cards and tiles. */
+.lift {
+  transition:
+    transform 180ms var(--ease-out),
+    box-shadow 180ms var(--ease-out);
+}
+.lift:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-raised);
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+.status-pulse {
+  animation: pulse-dot 2s infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -200% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-hover) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: 4px;
+}
+
+/* Thin top progress bar while a navigation is pending. */
+@keyframes route-progress {
+  0% {
+    transform: scaleX(0);
+  }
+  60% {
+    transform: scaleX(0.7);
+  }
+  100% {
+    transform: scaleX(0.92);
+  }
+}
+.route-progress {
+  transform-origin: left;
+  animation: route-progress 2.5s var(--ease-out) forwards;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

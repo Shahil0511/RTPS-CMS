@@ -1,0 +1,84 @@
+###############################################
+# MediaMTX configuration for Libas VMS
+#
+# Camera paths are NOT listed here: the VMS application registers every
+# enabled camera through the Control API and keeps them in sync.
+# Values can be overridden with environment variables (MTX_<KEY>), which is
+# what scripts/run-mediamtx.mjs does for the auth URL and recording folder.
+###############################################
+
+logLevel: info
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 1024
+
+###############################################
+# Authentication: every action (read, playback, api, ...) is validated by the
+# VMS application. Browsers send a short-lived bearer token issued by the app.
+authMethod: http
+authHTTPAddress: http://127.0.0.1:3000/api/internal/mediamtx-auth
+authHTTPExclude: []
+
+###############################################
+# Control API (used by the VMS server only)
+api: yes
+apiAddress: :9997
+
+metrics: yes
+metricsAddress: 127.0.0.1:9998
+
+pprof: no
+
+###############################################
+# Playback server (proxied by the VMS server, never exposed directly)
+playback: yes
+playbackAddress: :9996
+playbackAllowOrigins: ["*"]
+
+###############################################
+# Protocols
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp, udp]
+rtspAuthMethods: [basic]
+
+rtmp: no
+srt: no
+moq: no
+
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigins: ["*"]
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsMuxerCloseAfter: 60s
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ["*"]
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: yes
+webrtcAdditionalHosts: []
+webrtcICEServers2: []
+
+###############################################
+# Defaults for every camera path (per-camera values are set through the API)
+pathDefaults:
+  source: publisher
+  sourceOnDemand: no
+  rtspTransport: tcp
+  maxReaders: 0
+
+  record: no
+  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f_%z
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordMaxPartSize: 50M
+  recordSegmentDuration: 15m
+  recordDeleteAfter: 7d
+
+paths: {}

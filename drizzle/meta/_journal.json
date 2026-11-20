@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1793960088207,
+      "tag": "0000_initial_vms_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793963494230,
+      "tag": "0001_devices_sites_playback",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793964913356,
+      "tag": "0002_nvr_playback_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793965623333,
+      "tag": "0003_clock_drift",
+      "breakpoints": true
+    }
+  ]
+}

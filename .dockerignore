@@ -1,0 +1,7 @@
+node_modules
+.next
+data
+recordings
+mediamtx/bin
+.env
+*.log
