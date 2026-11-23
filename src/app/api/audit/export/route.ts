@@ -2,23 +2,18 @@ import { NextResponse, type NextRequest } from "next/server";
 import { apiError } from "@/lib/api-utils";
 import { rolesFor } from "@/lib/auth/rbac";
 import { requireApiUser } from "@/lib/auth/session";
+import { csvCell } from "@/lib/csv";
 import { exportAuditLogs } from "@/server/queries/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function csvCell(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  const s = v instanceof Date ? v.toISOString() : String(v);
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
 /** Downloads the filtered audit trail as CSV (administrators only). */
 export async function GET(req: NextRequest) {
   try {
-    await requireApiUser(rolesFor("audit.export"));
+    const user = await requireApiUser(rolesFor("audit.export"));
     const sp = req.nextUrl.searchParams;
-    const rows = await exportAuditLogs({
+    const rows = await exportAuditLogs(user, {
       action: sp.get("action"),
       actor: sp.get("actor"),
       entityType: sp.get("entityType"),

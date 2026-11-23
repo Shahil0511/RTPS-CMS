@@ -6,8 +6,8 @@ import { cameras, playbackSessions, users } from "@/db/schema";
 import { env } from "@/env";
 import { verifyPassword } from "@/lib/auth/password";
 import { isLocked, recordFailure, recordSuccess } from "@/lib/auth/rate-limit";
-import { canAccessStore } from "@/lib/auth/rbac";
-import { loadSessionUser } from "@/lib/auth/session";
+import { canAccessCamera } from "@/lib/auth/rbac";
+import { loadSessionUser, type SessionUser } from "@/lib/auth/session";
 import { verifyStreamToken } from "@/lib/auth/stream-token";
 import { PLAYBACK_PATH_PREFIX } from "@/lib/mediamtx/sync";
 
@@ -35,14 +35,38 @@ function safeEqual(a: string, b: string): boolean {
 const deny = (reason: string) => NextResponse.json({ error: reason }, { status: 401 });
 const allow = () => new NextResponse(null, { status: 200 });
 
-/** Store that owns a stream path: a live camera path, or the camera behind a playback session. */
-async function storeOfPath(path: string): Promise<string | null> {
+interface PathOwner {
+  cameraId: string;
+  storeId: string;
+  /** True for playback-session paths. */
+  isSession: boolean;
+  /** For playback-session paths: the user who opened the session (null once that user is deleted). */
+  sessionUserId: string | null;
+}
+
+/** Camera behind a stream path: a live camera path, or the camera behind an open playback session. */
+async function ownerOfPath(path: string): Promise<PathOwner | null> {
   if (path.startsWith(PLAYBACK_PATH_PREFIX)) {
-    const s = await db.query.playbackSessions.findFirst({ where: eq(playbackSessions.pathName, path), with: { camera: { columns: { storeId: true } } } });
-    return s && !s.closedAt ? s.camera.storeId : null;
+    const s = await db.query.playbackSessions.findFirst({ where: eq(playbackSessions.pathName, path), with: { camera: { columns: { id: true, storeId: true } } } });
+    return s && !s.closedAt ? { cameraId: s.camera.id, storeId: s.camera.storeId, isSession: true, sessionUserId: s.userId ?? null } : null;
   }
-  const camera = await db.query.cameras.findFirst({ where: eq(cameras.pathName, path), columns: { storeId: true, isEnabled: true } });
-  return camera && camera.isEnabled ? camera.storeId : null;
+  const camera = await db.query.cameras.findFirst({ where: eq(cameras.pathName, path), columns: { id: true, storeId: true, isEnabled: true } });
+  return camera && camera.isEnabled ? { cameraId: camera.id, storeId: camera.storeId, isSession: false, sessionUserId: null } : null;
+}
+
+/**
+ * Store AND camera-level assignment (vms.user_cameras) must allow the camera;
+ * a playback session may only be read by the user who opened it (or an admin;
+ * an ownerless session is admin-only).
+ * MediaMTX "playback" (its recordings server, /get returns whole files) is a
+ * download, so it additionally needs the user's effective download right.
+ */
+function mayRead(user: SessionUser | null, owner: PathOwner | null, action: string): boolean {
+  if (!user || !owner) return false;
+  if (!canAccessCamera(user, { id: owner.cameraId, storeId: owner.storeId })) return false;
+  if (owner.isSession && owner.sessionUserId !== user.id && !user.isAdmin) return false;
+  if (action === "playback" && !user.canDownload) return false;
+  return true;
 }
 
 /**
@@ -67,8 +91,7 @@ async function tokenAllows(token: string, action: string, path: string): Promise
     // Re-check the account on every (uncached) decision: deactivation, password
     // reset or losing the site revokes stream access within TOKEN_CACHE_MS.
     const user = await loadSessionUser(claims.userId, claims.tokenVersion);
-    const storeId = user ? await storeOfPath(path) : null;
-    ok = Boolean(user && storeId && canAccessStore(user, storeId));
+    ok = mayRead(user, user ? await ownerOfPath(path) : null, action);
   }
   if (tokenCache.size > 5000) tokenCache.clear();
   tokenCache.set(key, { ok, until: Date.now() + TOKEN_CACHE_MS });
@@ -82,6 +105,7 @@ async function tokenAllows(token: string, action: string, path: string): Promise
  *  1. the VMS service account (Basic auth from this server)        -> any action
  *  2. a stream bearer token issued by the app                       -> read of that path
  *  3. a VMS username/password (e.g. VLC via rtsp://user:pass@host)  -> read of permitted cameras
+ * "Permitted" = the user's stores plus any camera-level assignment (see mayRead).
  * Password checks (1 and 3) share the login lockout.
  */
 export async function POST(req: NextRequest) {
@@ -129,9 +153,8 @@ export async function POST(req: NextRequest) {
     }
     recordSuccess(acctKey);
     const session = await loadSessionUser(account.id);
-    const storeId = session ? await storeOfPath(path) : null;
     // Same answer for "no such camera" and "no access" so paths cannot be enumerated.
-    if (!session || !storeId || !canAccessStore(session, storeId)) return deny("Invalid credentials");
+    if (!mayRead(session, session ? await ownerOfPath(path) : null, action)) return deny("Invalid credentials");
     return allow();
   }
 

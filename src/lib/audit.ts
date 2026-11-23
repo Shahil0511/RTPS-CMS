@@ -28,6 +28,14 @@ export const AUDIT_ACTIONS = [
   "playback.exported",
   "stream.viewed",
   "settings.updated",
+  "report.downtime_exported",
+  "alert.recipient_created",
+  "alert.recipient_updated",
+  "alert.recipient_deleted",
+  "alert.settings_updated",
+  "alert.test_sent",
+  "alert.daily_report_sent",
+  "alert.outbox_flushed",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

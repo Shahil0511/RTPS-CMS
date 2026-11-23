@@ -6,7 +6,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { cameras, devices, stores, RTSP_TRANSPORTS, type Camera, type Device } from "@/db/schema";
 import { audit } from "@/lib/audit";
-import { canAccessStore, rolesFor } from "@/lib/auth/rbac";
+import { canAccessCamera, canAccessStore, hasWholeStore, rolesFor, WHOLE_STORE_REQUIRED } from "@/lib/auth/rbac";
 import { requestMeta, requireUser, type SessionUser } from "@/lib/auth/session";
 import { encryptSecret } from "@/lib/crypto";
 import { env } from "@/env";
@@ -136,6 +136,8 @@ export async function createCameraAction(_prev: ActionState, formData: FormData)
   const d = parsed.data;
   try {
     const store = await assertStoreAccess(user, d.storeId);
+    // A camera-limited user could point a new camera at a channel they were not granted.
+    if (!hasWholeStore(user, d.storeId)) return failure(WHOLE_STORE_REQUIRED);
     const device = await resolveDevice(user, d);
     const pathName = await uniquePathName(store.code, d.name);
     const [row] = await db
@@ -174,12 +176,26 @@ export async function updateCameraAction(_prev: ActionState, formData: FormData)
   try {
     const current = await db.query.cameras.findFirst({ where: eq(cameras.id, id) });
     if (!current) return failure("Camera not found.");
-    if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this camera.");
+    if (!canAccessCamera(user, current)) return failure("You do not have access to this camera.");
     const store = await assertStoreAccess(user, d.storeId);
     const device = await resolveDevice(user, d);
 
+    // Camera-limited users may rename/describe/enable a granted camera, but never change what it
+    // shows: its location, recorder, channel, path or address. Their saves keep the stored source.
+    const limited = !hasWholeStore(user, current.storeId) || !hasWholeStore(user, d.storeId);
+    if (limited) {
+      const rawPath = String(formData.get("rtspPath") ?? "").trim();
+      const sourceChanged =
+        d.storeId !== current.storeId ||
+        (d.deviceId ?? null) !== (current.deviceId ?? null) ||
+        (d.channel ?? null) !== (current.channel ?? null) ||
+        (rawPath !== "" && d.rtspPath !== current.rtspPath) ||
+        (!d.deviceId && (d.host !== (current.host ?? "") || d.port !== current.port || (d.username ?? null) !== (current.username ?? null) || Boolean(d.password)));
+      if (sourceChanged) return failure("Only users with access to every camera at this location can change a camera's location, recorder, channel or address.");
+    }
+
     // A direct camera's stored password must never be sent to a different address.
-    if (!device && current.passwordEnc && !d.password && (current.host !== d.host || current.port !== d.port)) {
+    if (!limited && !device && current.passwordEnc && !d.password && (current.host !== d.host || current.port !== d.port)) {
       return { ok: false, error: "Re-enter the camera password when changing its address or port.", fieldErrors: { password: ["Required when the address changes"] } };
     }
 
@@ -189,11 +205,11 @@ export async function updateCameraAction(_prev: ActionState, formData: FormData)
     const [row] = await db
       .update(cameras)
       .set({
-        storeId: d.storeId,
+        storeId: limited ? current.storeId : d.storeId,
         name: d.name,
         pathName,
         description: d.description,
-        ...sourceColumns(d, device),
+        ...(limited ? {} : sourceColumns(d, device)),
         transport: d.transport,
         recordEnabled: false,
         retentionDays: d.retentionDays,
@@ -225,7 +241,7 @@ export async function deleteCameraAction(id: string): Promise<ActionState> {
   const user = await requireUser(rolesFor("cameras.manage"));
   const current = await db.query.cameras.findFirst({ where: eq(cameras.id, id) });
   if (!current) return failure("Camera not found.");
-  if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this camera.");
+  if (!canAccessCamera(user, current)) return failure("You do not have access to this camera.");
   await db.delete(cameras).where(eq(cameras.id, id));
   try {
     await removeCameraPath(current.pathName);
@@ -242,7 +258,7 @@ export async function restartCameraAction(id: string): Promise<ActionState> {
   const user = await requireUser(rolesFor("cameras.manage"));
   const current = await db.query.cameras.findFirst({ where: eq(cameras.id, id) });
   if (!current) return failure("Camera not found.");
-  if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this camera.");
+  if (!canAccessCamera(user, current)) return failure("You do not have access to this camera.");
   try {
     await mtx.deletePath(current.pathName);
     await syncCamera(current);
@@ -266,7 +282,7 @@ export async function testCameraAction(id: string): Promise<ActionState> {
   const user = await requireUser(rolesFor("cameras.manage"));
   const current = await db.query.cameras.findFirst({ where: eq(cameras.id, id) });
   if (!current) return failure("Camera not found.");
-  if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this camera.");
+  if (!canAccessCamera(user, current)) return failure("You do not have access to this camera.");
   const source = await resolveSource(current);
   if (!source.host) return failure("This camera has no recorder or host configured.");
   const probe = await tcpProbe(source.host, source.port);
@@ -304,12 +320,15 @@ export async function importCamerasAction(_prev: ActionState, formData: FormData
   const d = parsed.data;
   try {
     const store = await assertStoreAccess(user, d.storeId);
+    if (!hasWholeStore(user, d.storeId)) return failure(WHOLE_STORE_REQUIRED);
     const { cameras: found, errors } = parseCameraList(d.text);
     if (found.length === 0) return failure(`No valid RTSP URLs found. ${errors[0] ?? ""}`.trim());
 
     // Every host:port in the list is a recorder: find or create it once, then link channels to it.
     const existing = await db.select().from(cameras).where(eq(cameras.storeId, d.storeId));
-    const allDevices = await db.select().from(devices);
+    // Recorders are matched inside the target store only: store LANs reuse the same private
+    // addresses, so the same host:port at another store is a different recorder.
+    const allDevices = await db.select().from(devices).where(eq(devices.storeId, d.storeId));
     const deviceByEndpoint = new Map(allDevices.map((dev) => [`${dev.host}:${dev.rtspPort}`, dev]));
     const existingKeys = new Set(
       existing.map((c) => {
@@ -330,7 +349,6 @@ export async function importCamerasAction(_prev: ActionState, formData: FormData
       }
       const endpoint = `${item.parts.host}:${item.parts.port}`;
       let device = deviceByEndpoint.get(endpoint) ?? null;
-      if (device && !canAccessStore(user, device.storeId)) throw new Error(`Recorder ${device.name} (${endpoint}) belongs to a site you cannot access.`);
       if (!device) {
         const [dev] = await db
           .insert(devices)
@@ -398,7 +416,7 @@ export async function toggleCameraEnabledAction(id: string, enabled: boolean): P
   const user = await requireUser(rolesFor("cameras.manage"));
   const current = await db.query.cameras.findFirst({ where: and(eq(cameras.id, id)) });
   if (!current) return failure("Camera not found.");
-  if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this camera.");
+  if (!canAccessCamera(user, current)) return failure("You do not have access to this camera.");
   const [row] = await db.update(cameras).set({ isEnabled: enabled }).where(eq(cameras.id, id)).returning();
   const meta = await requestMeta();
   await audit({ actor: user, action: "camera.updated", entityType: "camera", entityId: id, entityLabel: current.name, details: { enabled }, ...meta });

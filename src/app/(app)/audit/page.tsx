@@ -39,7 +39,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
     from: sp.from ? new Date(sp.from) : null,
     to: sp.to ? new Date(`${sp.to}T23:59:59.999`) : null,
   };
-  const [page, actions] = await Promise.all([listAuditLogs(filter), distinctAuditActions()]);
+  const [page, actions] = await Promise.all([listAuditLogs(user, filter), distinctAuditActions()]);
 
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(sp)) if (v && k !== "page") qs.set(k, v);
@@ -49,7 +49,11 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
     <>
       <PageHeader
         title="Audit logs"
-        description="Every sign-in, configuration change and playback request, with actor, source address and timestamp."
+        description={
+          user.isAdmin
+            ? "Every sign-in, configuration change and playback request, with actor, source address and timestamp."
+            : "Your own activity plus changes and playback for the locations, recorders and cameras you can access."
+        }
         actions={
           can(user, "audit.export") ? (
             <a href={`/api/audit/export?${qs.toString()}`} className={buttonClasses("secondary")}>

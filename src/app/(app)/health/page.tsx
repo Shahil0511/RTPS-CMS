@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { Camera, HardDrive } from "lucide-react";
+import { deviceVendorId, dataQualityFlags, recorderLinkState, vendorLabel } from "@/components/health/connection-state";
 import { HealthTable } from "@/components/health/health-table";
-import { RecordersCard } from "@/components/health/recorders-card";
+import { OpenIncidentsCard } from "@/components/health/open-incidents";
+import { AwaitingConnectivityCard, RecordersCard } from "@/components/health/recorders-card";
 import { RunHealthButton } from "@/components/health/run-health-button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { StatusDot } from "@/components/ui/badge";
@@ -13,7 +15,9 @@ import { requireUser } from "@/lib/auth/session";
 import { formatDateTime } from "@/lib/format";
 import { deviceUptimeFor, recentDeviceStatusEvents } from "@/lib/devices/health";
 import { recentStatusEvents } from "@/lib/health/monitor";
+import { isConnectable } from "@/lib/vendors";
 import { listCamerasForUser } from "@/server/queries/cameras";
+import { openIncidentsForUser } from "@/server/queries/dashboard";
 import { listDevicesForUser } from "@/server/queries/devices";
 import { storeOptionsForUser } from "@/server/queries/stores";
 
@@ -32,13 +36,17 @@ interface HistoryEvent {
 
 export default async function HealthPage() {
   const user = await requireUser(rolesFor("health.view"));
-  const [cameras, stores, devices] = await Promise.all([listCamerasForUser(user), storeOptionsForUser(user), listDevicesForUser(user)]);
+  const [cameras, stores, devices, openIncidents] = await Promise.all([listCamerasForUser(user), storeOptionsForUser(user), listDevicesForUser(user), openIncidentsForUser(user, 15)]);
+  // Only recorders with a network path are probed; the rest are listed separately and never alerted on.
+  const connected = devices.filter((d) => isConnectable(d));
+  const awaiting = devices.filter((d) => !isConnectable(d));
+
   const since = new Date(Date.now() - 24 * 3600 * 1000);
   const [cameraEvents, deviceEvents, deviceUptime] = await Promise.all([
     recentStatusEvents(30, cameras.map((c) => c.id)),
-    recentDeviceStatusEvents(30, devices.map((d) => d.id)),
+    recentDeviceStatusEvents(30, connected.map((d) => d.id)),
     deviceUptimeFor(
-      devices.map((d) => d.id),
+      connected.map((d) => d.id),
       since,
     ),
   ]);
@@ -54,12 +62,14 @@ export default async function HealthPage() {
     <>
       <PageHeader
         title="Health monitoring"
-        description={`Online/offline connectivity checks every ${env.HEALTH_CHECK_INTERVAL_SECONDS}s: a TCP probe of each recorder plus stream state from the streaming server for every channel.`}
+        description={`Online/offline connectivity checks every ${env.HEALTH_CHECK_INTERVAL_SECONDS}s for connected recorders: a TCP probe of each recorder plus stream state from the streaming server for every channel.`}
         actions={can(user, "health.run") ? <RunHealthButton /> : null}
       />
 
+      <OpenIncidentsCard items={openIncidents.items} total={openIncidents.total} available={openIncidents.available} reportsHref={can(user, "reports.view") ? "/reports" : null} />
+
       <RecordersCard
-        items={devices.map((d) => ({
+        items={connected.map((d) => ({
           id: d.id,
           name: d.name,
           kind: d.kind,
@@ -75,13 +85,30 @@ export default async function HealthPage() {
           cameraCount: d.cameraCount,
           onlineCameraCount: d.onlineCameraCount,
           storageStatus: d.storageStatus,
+          vendorLabel: vendorLabel(deviceVendorId(d)),
+          linkState: recorderLinkState(d),
+        }))}
+      />
+
+      <AwaitingConnectivityCard
+        items={awaiting.map((d) => ({
+          id: d.id,
+          name: d.name,
+          kind: d.kind,
+          store: d.store.name,
+          storeId: d.storeId,
+          host: d.host,
+          vendorLabel: vendorLabel(deviceVendorId(d)),
+          linkState: recorderLinkState(d),
+          cloudPlatform: d.cloudPlatform,
+          flags: dataQualityFlags(d.notes),
         }))}
       />
 
       <HealthTable stores={stores.map((s) => ({ id: s.id, name: s.name }))} refreshSeconds={Math.max(10, Math.min(60, env.HEALTH_CHECK_INTERVAL_SECONDS))} />
 
       <Card className="mt-5">
-        <CardHeader title="Status history" description="Most recent transitions across your recorders and cameras." />
+        <CardHeader title="Status history" description="Most recent transitions across your connected recorders and cameras." />
         <CardBody className="px-0 pb-0">
           {events.length === 0 ? (
             <p className="px-5 pb-5 text-sm text-muted">No transitions recorded yet.</p>
@@ -99,7 +126,11 @@ export default async function HealthPage() {
                   <span className={`ml-auto text-[12px] ${e.status === "ONLINE" ? "text-success" : e.status === "OFFLINE" ? "text-danger" : "text-warning"}`}>
                     {e.status === "ONLINE" ? "online" : e.status === "OFFLINE" ? "offline" : "unknown"}
                   </span>
-                  {e.detail ? <span className="hidden max-w-sm truncate text-[12px] text-faint lg:inline" title={e.detail}>{e.detail}</span> : null}
+                  {e.detail ? (
+                    <span className="hidden max-w-sm truncate text-[12px] text-faint lg:inline" title={e.detail}>
+                      {e.detail}
+                    </span>
+                  ) : null}
                 </li>
               ))}
             </ul>

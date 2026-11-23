@@ -1,8 +1,8 @@
 import "server-only";
-import { and, asc, eq, ilike, inArray, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, ilike, or, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { cameras, devices, stores, type Camera, type Device, type Store } from "@/db/schema";
-import { storeScope } from "@/lib/auth/rbac";
+import { canAccessCamera, cameraScopeFilter } from "@/lib/auth/rbac";
 import type { SessionUser } from "@/lib/auth/session";
 
 export type CameraDeviceRef = Pick<Device, "id" | "name" | "kind" | "host" | "rtspPort" | "status" | "isEnabled">;
@@ -19,11 +19,12 @@ const deviceColumns = { id: devices.id, name: devices.name, kind: devices.kind, 
 
 /** Cameras visible to the user, optionally filtered. Secrets are never returned. */
 export async function listCamerasForUser(user: SessionUser, filter: CameraFilter = {}): Promise<CameraRow[]> {
-  const scope = storeScope(user);
-  if (scope && scope.length === 0) return [];
+  if (!user.isAdmin && user.storeIds.length === 0) return [];
 
   const conditions: SQL[] = [];
-  if (scope) conditions.push(inArray(cameras.storeId, scope));
+  // Store assignment plus any camera-level restriction (vms.user_cameras).
+  const scope = cameraScopeFilter(user);
+  if (scope) conditions.push(scope);
   if (filter.storeId) conditions.push(eq(cameras.storeId, filter.storeId));
   if (filter.deviceId) conditions.push(eq(cameras.deviceId, filter.deviceId));
   if (filter.enabledOnly) conditions.push(eq(cameras.isEnabled, true));
@@ -44,7 +45,10 @@ export async function listCamerasForUser(user: SessionUser, filter: CameraFilter
   return rows.map((r) => ({ ...stripSecret(r.camera), store: r.store, device: r.device?.id ? r.device : null }));
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function getCameraForUser(user: SessionUser, id: string): Promise<CameraRow | null> {
+  if (!UUID_RE.test(id)) return null;
   const row = await db.query.cameras.findFirst({
     where: eq(cameras.id, id),
     with: {
@@ -52,11 +56,31 @@ export async function getCameraForUser(user: SessionUser, id: string): Promise<C
       device: { columns: { id: true, name: true, kind: true, host: true, rtspPort: true, status: true, isEnabled: true } },
     },
   });
-  if (!row) return null;
-  const scope = storeScope(user);
-  if (scope && !scope.includes(row.storeId)) return null;
+  // Same "not found" for a missing camera and one the user may not open (no enumeration).
+  if (!row || !canAccessCamera(user, row)) return null;
   const { store, device, ...camera } = row;
   return { ...stripSecret(camera), store, device: device ?? null };
+}
+
+export interface CameraOption {
+  id: string;
+  name: string;
+  storeId: string;
+  channel: number | null;
+  deviceName: string | null;
+  isEnabled: boolean;
+}
+
+/**
+ * Every camera as a lightweight option list (no secrets, no addresses), used
+ * by the Users screen to assign cameras. Admin-only callers.
+ */
+export async function listCameraOptions(): Promise<CameraOption[]> {
+  return db
+    .select({ id: cameras.id, name: cameras.name, storeId: cameras.storeId, channel: cameras.channel, deviceName: devices.name, isEnabled: cameras.isEnabled })
+    .from(cameras)
+    .leftJoin(devices, eq(cameras.deviceId, devices.id))
+    .orderBy(asc(cameras.storeId), asc(cameras.sortOrder), asc(cameras.name));
 }
 
 /** Raw camera (with encrypted secret) for server-internal use only. */

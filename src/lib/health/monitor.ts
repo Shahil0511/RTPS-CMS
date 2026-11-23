@@ -4,10 +4,19 @@ import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { cameras, cameraStatusEvents, settings, type Camera, type CameraStatus } from "@/db/schema";
 import { env } from "@/env";
+import { dispatchAlerts } from "@/lib/alerts/dispatch";
+import { syncIncidents } from "@/lib/alerts/incidents";
+import { withAlertLock } from "@/lib/alerts/lock";
 import { loadDevicesFor } from "@/lib/cameras/source";
-import { runDeviceHealthCheck } from "@/lib/devices/health";
+import { notMonitoredReason, runDeviceHealthCheck } from "@/lib/devices/health";
 import { getChannelStatus, type ChannelStatus } from "@/lib/hikvision/isapi";
 import { describeTracks, mtx, type MtxPath } from "@/lib/mediamtx/client";
+import { isIsapiVendor } from "@/lib/vendors";
+
+/** Recorders that speak Hikvision ISAPI (Hikvision itself and OEMs: Tyco Holis, Honeywell on Hikvision firmware). */
+function speaksIsapi(vendor: string): boolean {
+  return isIsapiVendor(vendor);
+}
 
 export interface HealthRunResult {
   checkedAt: Date;
@@ -20,7 +29,14 @@ export interface HealthRunResult {
   devicesTotal: number;
   devicesOnline: number;
   devicesOffline: number;
+  /** Recorders not probed (disabled, pending network route, cloud-only). */
+  devicesSkipped: number;
   deviceTransitions: Array<{ deviceId: string; name: string; from: CameraStatus; to: CameraStatus }>;
+  /** Downtime incidents opened / closed by this run. */
+  incidentsOpened: number;
+  incidentsClosed: number;
+  /** Alert emails queued by this run (offline/restored, one per recipient). */
+  alertEmailsQueued: number;
   mediamtxReachable: boolean;
   error?: string;
 }
@@ -67,12 +83,29 @@ const runState = {
 export async function runHealthCheck(): Promise<HealthRunResult> {
   const checkedAt = new Date();
   if (runState.value) {
-    return { checkedAt, total: 0, online: 0, offline: 0, unknown: 0, transitions: [], devicesTotal: 0, devicesOnline: 0, devicesOffline: 0, deviceTransitions: [], mediamtxReachable: true, error: "A check is already running" };
+    return {
+      checkedAt,
+      total: 0,
+      online: 0,
+      offline: 0,
+      unknown: 0,
+      transitions: [],
+      devicesTotal: 0,
+      devicesOnline: 0,
+      devicesOffline: 0,
+      devicesSkipped: 0,
+      deviceTransitions: [],
+      incidentsOpened: 0,
+      incidentsClosed: 0,
+      alertEmailsQueued: 0,
+      mediamtxReachable: true,
+      error: "A check is already running",
+    };
   }
   runState.value = true;
   try {
     // Recorders first: their reachability explains most channel outages.
-    let deviceRun = { total: 0, online: 0, offline: 0, transitions: [] as HealthRunResult["deviceTransitions"] };
+    let deviceRun = { total: 0, online: 0, offline: 0, skipped: 0, transitions: [] as HealthRunResult["deviceTransitions"] };
     try {
       deviceRun = await runDeviceHealthCheck();
     } catch (e) {
@@ -99,16 +132,21 @@ export async function runHealthCheck(): Promise<HealthRunResult> {
       devicesTotal: deviceRun.total,
       devicesOnline: deviceRun.online,
       devicesOffline: deviceRun.offline,
+      devicesSkipped: deviceRun.skipped,
       deviceTransitions: deviceRun.transitions,
+      incidentsOpened: 0,
+      incidentsClosed: 0,
+      alertEmailsQueued: 0,
       mediamtxReachable: paths !== null,
       error: mtxError,
     };
 
     // Channels inherit their recorder's address; standalone cameras use their own.
+    // Channels of recorders the server cannot reach (pending network, cloud-only) are never probed.
     const deviceMap = await loadDevicesFor(all);
     const endpointOf = (c: Camera): string | null => {
       const d = c.deviceId ? deviceMap.get(c.deviceId) : null;
-      if (d) return `${d.host}:${d.rtspPort}`;
+      if (d) return notMonitoredReason(d) ? null : `${d.host}:${d.rtspPort}`;
       return c.host ? `${c.host}:${c.port}` : null;
     };
 
@@ -131,7 +169,7 @@ export async function runHealthCheck(): Promise<HealthRunResult> {
     // video, so it works with on-demand live streams and without the streaming server.
     const channelStatus = new Map<string, Map<number, ChannelStatus>>();
     const channelStatusError = new Map<string, string>();
-    const recorders = [...deviceMap.values()].filter((d) => d.isEnabled && d.status === "ONLINE" && d.vendor === "hikvision" && d.kind !== "CAMERA");
+    const recorders = [...deviceMap.values()].filter((d) => !notMonitoredReason(d) && d.status === "ONLINE" && speaksIsapi(d.vendor) && d.kind !== "CAMERA");
     await Promise.all(
       recorders.map(async (d) => {
         try {
@@ -160,13 +198,15 @@ export async function runHealthCheck(): Promise<HealthRunResult> {
       }
       latency = probe?.latencyMs ?? null;
       const chan = device && camera.channel ? channelStatus.get(device.id)?.get(camera.channel) : undefined;
+      const deviceSkip = device ? notMonitoredReason(device) : null;
 
       if (!camera.isEnabled) {
         next = "UNKNOWN";
         detail = "Camera disabled";
-      } else if (device && !device.isEnabled) {
+      } else if (deviceSkip) {
+        // Recorder disabled, pending a network route or cloud-only: listed, never probed or alerted on.
         next = "UNKNOWN";
-        detail = "Recorder disabled";
+        detail = deviceSkip;
       } else if (device && device.status === "OFFLINE") {
         next = "OFFLINE";
         detail = `Recorder ${device.name} is offline`;
@@ -185,7 +225,8 @@ export async function runHealthCheck(): Promise<HealthRunResult> {
         next = "UNKNOWN";
         detail = `Recorder channel status unavailable: ${channelStatusError.get(device.id)}`;
       } else if (!endpoint) {
-        next = "OFFLINE";
+        // Nothing to probe: a configuration gap, not an outage, so it never opens an incident.
+        next = "UNKNOWN";
         detail = "No recorder or host configured";
       } else if (probe && !probe.ok) {
         next = "OFFLINE";
@@ -230,6 +271,30 @@ export async function runHealthCheck(): Promise<HealthRunResult> {
       .insert(settings)
       .values({ key: "health.lastRun", value: JSON.stringify({ at: checkedAt.toISOString(), online: result.online, offline: result.offline, unknown: result.unknown, devicesOnline: result.devicesOnline, devicesOffline: result.devicesOffline, mediamtxReachable: result.mediamtxReachable }) })
       .onConflictDoUpdate({ target: settings.key, set: { value: sql`excluded.value`, updatedAt: new Date() } });
+
+    // Downtime log + offline/restored alerts from the statuses just written, under a cross-process
+    // advisory lock (scheduler and `npm run health:run` never reconcile at the same time).
+    // Emails are queued only; the scheduler delivers them. Never breaks the check.
+    try {
+      const locked = await withAlertLock(async () => {
+        try {
+          const inc = await syncIncidents(checkedAt);
+          result.incidentsOpened = inc.opened;
+          result.incidentsClosed = inc.closed;
+        } catch (e) {
+          console.error("[health] downtime incident sync failed", e);
+        }
+        try {
+          const alerts = await dispatchAlerts(new Date());
+          result.alertEmailsQueued = alerts.emails;
+        } catch (e) {
+          console.error("[health] alert dispatch failed", e);
+        }
+      });
+      if (!locked.ran) console.log("[health] downtime/alerts skipped: another process is reconciling them");
+    } catch (e) {
+      console.error("[health] downtime/alerts lock failed", e);
+    }
 
     return result;
   } finally {

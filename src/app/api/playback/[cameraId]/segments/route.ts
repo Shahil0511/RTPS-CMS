@@ -1,13 +1,18 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { apiError, noStore } from "@/lib/api-utils";
+import { rolesFor } from "@/lib/auth/rbac";
 import { requireApiUser } from "@/lib/auth/session";
 import { deviceClock, mergeSegments, searchRecordings } from "@/lib/hikvision/isapi";
 import { mtx } from "@/lib/mediamtx/client";
 import { playbackContext } from "@/lib/playback/sessions";
+import { isIsapiVendor, vendorLabel } from "@/lib/vendors";
 import { getCameraForUser, getCameraInternal } from "@/server/queries/cameras";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const unsupportedVendor = (vendor: string) =>
+  NextResponse.json({ error: `Playback search/download not yet supported for ${vendorLabel(vendor)}` }, { status: 501 });
 
 const MAX_WINDOW_MS = 7 * 86400_000;
 
@@ -18,7 +23,7 @@ const MAX_WINDOW_MS = 7 * 86400_000;
  */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ cameraId: string }> }) {
   try {
-    const user = await requireApiUser();
+    const user = await requireApiUser(rolesFor("playback.view"));
     const { cameraId } = await ctx.params;
     const visible = await getCameraForUser(user, cameraId);
     if (!visible) return NextResponse.json({ error: "Camera not found" }, { status: 404 });
@@ -38,6 +43,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ cameraId: s
       const camera = await getCameraInternal(cameraId);
       if (!camera) return NextResponse.json({ error: "Camera not found" }, { status: 404 });
       const pc = await playbackContext(camera);
+      // Recording search and clip download are Hikvision ISAPI calls: never send them (or their digest login) to other vendors.
+      if (!isIsapiVendor(pc.device.vendor)) return unsupportedVendor(pc.device.vendor);
       const clock = deviceClock(pc.device, pc.siteTimeZone);
       const files = await searchRecordings(pc.device, pc.trackId, from, end, clock);
       const blocks = mergeSegments(files);

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { PlaybackBrowser } from "@/components/playback/playback-browser";
 import { PageHeader } from "@/components/ui/page-header";
-import { can, rolesFor } from "@/lib/auth/rbac";
+import { rolesFor } from "@/lib/auth/rbac";
 import { requireUser } from "@/lib/auth/session";
 import { listCamerasForUser } from "@/server/queries/cameras";
 
@@ -21,7 +21,7 @@ export default async function PlaybackPage() {
       />
       <Suspense>
         <PlaybackBrowser
-          canExport={can(user, "playback.export")}
+          canDownload={user.canDownload}
           cameras={cameras.map((c) => ({
             id: c.id,
             name: c.name,

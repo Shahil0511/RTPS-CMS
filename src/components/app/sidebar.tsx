@@ -2,8 +2,10 @@
 
 import {
   Activity,
+  BellRing,
   Building2,
   Camera,
+  FileClock,
   HardDrive,
   LayoutDashboard,
   Menu,
@@ -31,6 +33,8 @@ const ICONS: Record<NavItem["icon"], React.ComponentType<{ className?: string }>
   users: Users,
   audit: ScrollText,
   settings: Settings,
+  alerts: BellRing,
+  reports: FileClock,
 };
 
 /** Jira-style side navigation: light surface, blue selected item with a leading indicator. */

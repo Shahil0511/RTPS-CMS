@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, Film, HardDrive, Loader2, Play, RotateCcw, RotateCw, Square } from "lucide-react";
+import { Download, Film, HardDrive, Loader2, Lock, Play, RotateCcw, RotateCw, Square } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WhepPlayer } from "@/components/player/whep-player";
@@ -12,6 +12,7 @@ import { Field, Input, Select } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import type { CameraStatus, PlaybackMode } from "@/db/schema";
 import { cn, formatDuration, formatTime, toLocalDateInputValue } from "@/lib/format";
+import { VIEW_ONLY_CLIP_SECONDS } from "@/lib/playback/limits";
 
 export interface PlaybackCamera {
   id: string;
@@ -44,6 +45,12 @@ interface Playing {
   end: Date;
 }
 
+/** Seconds requested from /media for a local clip; view-only accounts are served in VIEW_ONLY_CLIP_SECONDS windows. */
+function localClipSeconds(p: Playing, canDownload: boolean): number {
+  const total = (p.end.getTime() - p.start.getTime()) / 1000;
+  return canDownload ? total : Math.min(total, VIEW_ONLY_CLIP_SECONDS);
+}
+
 const DAY_MS = 86400_000;
 
 /**
@@ -52,7 +59,8 @@ const DAY_MS = 86400_000;
  * from its disks, so this server stores nothing. LOCAL cameras fall back to
  * the streaming server's recordings.
  */
-export function PlaybackBrowser({ cameras, canExport }: { cameras: PlaybackCamera[]; canExport: boolean }) {
+/** canDownload = the user's effective footage-download right (server enforces it too). */
+export function PlaybackBrowser({ cameras, canDownload }: { cameras: PlaybackCamera[]; canDownload: boolean }) {
   const sp = useSearchParams();
   const router = useRouter();
   const toast = useToast();
@@ -318,13 +326,21 @@ export function PlaybackBrowser({ cameras, canExport }: { cameras: PlaybackCamer
           ) : playing && data?.source === "local" ? (
             <video
               key={playing.key}
-              src={`/api/playback/${cameraId}/media?${new URLSearchParams({ start: playing.start.toISOString(), duration: String((playing.end.getTime() - playing.start.getTime()) / 1000) })}`}
+              src={`/api/playback/${cameraId}/media?${new URLSearchParams({ start: playing.start.toISOString(), duration: String(localClipSeconds(playing, canDownload)) })}`}
               controls
+              // Hide the browser's own "Download" menu entry when the account may not download footage.
+              controlsList={canDownload ? undefined : "nodownload"}
+              onContextMenu={canDownload ? undefined : (e) => e.preventDefault()}
               autoPlay
               playsInline
               className="video-tile w-full"
               onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
               onPlaying={() => onPhase("playing")}
+              // View-only accounts get the block in windows (the server caps each one): continue with the next.
+              onEnded={() => {
+                const next = new Date(playing.start.getTime() + localClipSeconds(playing, canDownload) * 1000);
+                if (next.getTime() < playing.end.getTime() - 1000) begin(next, playing.end);
+              }}
             />
           ) : (
             <div className="video-tile grid place-items-center text-sm text-white/60">
@@ -405,7 +421,7 @@ export function PlaybackBrowser({ cameras, canExport }: { cameras: PlaybackCamer
                           <span className="block text-[12px] text-faint">{formatDuration(f.duration)}</span>
                         </span>
                       </button>
-                      {canExport && data?.source === "nvr" ? (
+                      {canDownload && data?.source === "nvr" ? (
                         <a
                           href={`/api/playback/${cameraId}/download?${new URLSearchParams({ start: f.start, end: f.end })}`}
                           className={buttonClasses("ghost", "icon")}
@@ -435,7 +451,13 @@ export function PlaybackBrowser({ cameras, canExport }: { cameras: PlaybackCamer
                 {Math.floor(Math.abs(data.recorder.utcOffsetMinutes) / 60)}:{String(Math.abs(data.recorder.utcOffsetMinutes) % 60).padStart(2, "0")})
               </p>
               <p className="text-[12px] text-faint">If footage plays from the wrong time, change the recorder&apos;s clock setting on the Recorders page.</p>
-              {canExport ? <p className="text-[12px] text-faint">Downloaded files are in the recorder&apos;s native format; VLC plays them directly.</p> : null}
+              {canDownload ? (
+                <p className="text-[12px] text-faint">Downloaded files are in the recorder&apos;s native format; VLC plays them directly.</p>
+              ) : (
+                <p className="inline-flex items-center gap-1.5 text-[12px] text-faint">
+                  <Lock className="h-3.5 w-3.5" /> Downloading footage is not enabled for your account.
+                </p>
+              )}
             </CardBody>
           </Card>
         ) : null}

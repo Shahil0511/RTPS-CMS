@@ -203,6 +203,35 @@ export const mtx = {
     return `${env.MEDIAMTX_PLAYBACK_URL.replace(/\/$/, "")}/get?${params.toString()}`;
   },
 
+  /**
+   * Disconnects the long-lived readers of a path (WebRTC, RTSP/RTSPS, RTMP/RTMPS, SRT); they must
+   * authenticate again to reconnect. HLS has no per-reader connection: every HLS request is
+   * authorised on its own, so revoked access stops there without a kick. Returns readers kicked.
+   */
+  kickReaders: async (path: Pick<MtxPath, "readers">): Promise<number> => {
+    const routes: Record<string, string> = {
+      webRTCSession: "webrtcsessions",
+      rtspSession: "rtspsessions",
+      rtspsSession: "rtspssessions",
+      rtmpConn: "rtmpconns",
+      rtmpsConn: "rtmpsconns",
+      srtConn: "srtconns",
+    };
+    let kicked = 0;
+    for (const r of path.readers ?? []) {
+      const route = routes[r.type];
+      if (!route || !r.id) continue;
+      try {
+        await api<void>("POST", `/v3/${route}/kick/${encodeURIComponent(r.id)}`);
+        kicked += 1;
+      } catch (e) {
+        // Already gone (404) is fine; anything else is retried by the next revocation or the token expiry.
+        if (!(e instanceof MediaMtxError && e.status === 404)) throw e;
+      }
+    }
+    return kicked;
+  },
+
   /** Kicks every reader/session of a path by replacing its configuration (forces a source reconnect). */
   restartPath: async (name: string): Promise<void> => {
     const conf = await mtx.getPathConf(name);

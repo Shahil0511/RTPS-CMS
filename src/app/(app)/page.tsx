@@ -1,37 +1,42 @@
-import { AlertTriangle, Camera, CheckCircle2, Clock, HardDrive, ShieldAlert, Users, WifiOff, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, Building2, Camera, CheckCircle2, Clock, HardDrive, Network, ShieldAlert, Timer, Users, WifiOff, XCircle } from "lucide-react";
 import Link from "next/link";
+import { Suspense } from "react";
 import { AvailabilityChart } from "@/components/dashboard/availability-chart";
+import { IncidentList } from "@/components/dashboard/incident-list";
+import { KpiTile, KpiTileSkeleton } from "@/components/dashboard/kpi-tile";
+import { OemCoverage } from "@/components/dashboard/oem-coverage";
+import { PanelSkeleton, RequirementReadiness } from "@/components/dashboard/requirement-readiness";
+import { ConnectionBadge } from "@/components/health/connection-badge";
 import { RunHealthButton } from "@/components/health/run-health-button";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { buttonClasses } from "@/components/ui/button";
-import { Card, CardBody, CardHeader, StatTile } from "@/components/ui/card";
+import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { can } from "@/lib/auth/rbac";
-import { requireUser } from "@/lib/auth/session";
-import { cn, formatDateTime, formatRelative, humanAction } from "@/lib/format";
-import { CLOCK_WARN_SECONDS, loadDashboard, type DashboardSite } from "@/server/queries/dashboard";
+import { requireUser, type SessionUser } from "@/lib/auth/session";
+import { cn, formatDateTime, formatDuration, formatRelative, humanAction } from "@/lib/format";
+import { CLOCK_WARN_SECONDS, loadDashboard, loadEstate, type DashboardSite } from "@/server/queries/dashboard";
 
 export const dynamic = "force-dynamic";
 
 const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : null);
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ denied?: string }> }) {
   const user = await requireUser();
   const { denied } = await searchParams;
-  const d = await loadDashboard(user);
-  const c = d.cameras;
-  const r = d.recorders;
-  const onlineShare = pct(c.online, c.enabled);
-  const lastCheck = d.recorderList.map((x) => x.lastCheckedAt).filter(Boolean).sort().at(-1) ?? null;
-  const alerts = r.offline + r.diskIssues + r.clockIssues;
 
   return (
     <>
       <PageHeader
         title="Dashboard"
-        description={lastCheck ? `Last health check ${formatRelative(lastCheck)} · ${c.enabled} cameras on ${r.total} recorders` : "Health checks start a few seconds after the server boots."}
+        description={
+          <Suspense fallback="Loading estate status…">
+            <HeaderSummary user={user} />
+          </Suspense>
+        }
         actions={
           <>
             {can(user, "health.run") ? <RunHealthButton /> : null}
@@ -43,56 +48,187 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       />
 
       {denied ? <Banner tone="warning" icon={<ShieldAlert className="h-4 w-4" />} title="You do not have permission to open that page." /> : null}
+
+      <Suspense fallback={<EstateSkeleton />}>
+        <EstateSection user={user} />
+      </Suspense>
+
+      <Suspense fallback={<OperationsSkeleton />}>
+        <OperationsSection user={user} />
+      </Suspense>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Header
+// ---------------------------------------------------------------------------
+
+async function HeaderSummary({ user }: { user: SessionUser }) {
+  const d = await loadDashboard(user);
+  const base = `${plural(d.cameras.enabled, "camera")} on ${plural(d.recorders.connected, "connected recorder")}`;
+  const waiting = d.awaitingConnectivity ? ` · ${d.awaitingConnectivity} awaiting connectivity` : "";
+  return <>{d.lastCheckAt ? `Last health check ${formatRelative(d.lastCheckAt)} · ${base}${waiting}` : `Health checks start a few seconds after the server boots · ${base}${waiting}`}</>;
+}
+
+// ---------------------------------------------------------------------------
+// Estate: KPIs, OEM coverage, requirement readiness, incidents
+// ---------------------------------------------------------------------------
+
+async function EstateSection({ user }: { user: SessionUser }) {
+  const e = await loadEstate(user);
+  const r = e.recorders;
+  const connected = r.LIVE + r.OFFLINE + r.CHECKING;
+  const inc = e.incidents;
+  const openTotal = inc.openCameras + inc.openRecorders;
+  const reportsHref = can(user, "reports.view") ? "/reports" : undefined;
+
+  return (
+    <section aria-label="Estate overview">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <KpiTile
+          label="Locations"
+          value={e.locations.total}
+          hint={e.locations.total ? [plural(e.locations.stores, "store"), plural(e.locations.warehouses, "warehouse"), `${e.locations.corporate} corporate`].join(" · ") : "No locations assigned to you"}
+          icon={<Building2 className="h-4 w-4" />}
+          href="/stores"
+          segments={[
+            { label: "Stores", value: e.locations.stores, color: "var(--chart-1)" },
+            { label: "Warehouses", value: e.locations.warehouses, color: "var(--chart-2)" },
+            { label: "Corporate", value: e.locations.corporate, color: "var(--chart-unknown)" },
+          ]}
+        />
+        <KpiTile
+          label="Recorders live"
+          value={r.LIVE}
+          of={r.total}
+          tone={r.OFFLINE ? "danger" : r.LIVE ? "success" : "default"}
+          hint={
+            r.total
+              ? [r.OFFLINE ? `${r.OFFLINE} offline` : null, r.PENDING ? `${r.PENDING} pending network` : null, r.CLOUD ? `${r.CLOUD} cloud-only` : null, r.CHECKING ? `${r.CHECKING} not checked` : null, r.DISABLED ? `${r.DISABLED} disabled` : null]
+                  .filter(Boolean)
+                  .join(" · ") || "Every recorder is live"
+              : "No recorders registered yet"
+          }
+          icon={<HardDrive className="h-4 w-4" />}
+          href="/devices"
+          segments={[
+            { label: "Live", value: r.LIVE, color: "var(--success)" },
+            { label: "Offline", value: r.OFFLINE, color: "var(--chart-offline)" },
+            { label: "Not checked", value: r.CHECKING, color: "var(--chart-unknown)" },
+            { label: "Pending network", value: r.PENDING, color: "var(--warning)" },
+            { label: "Cloud-only", value: r.CLOUD, color: "var(--chart-muted)" },
+            { label: "Disabled", value: r.DISABLED, color: "var(--border-strong)" },
+          ]}
+        />
+        <KpiTile
+          label="Cameras online"
+          value={e.cameras.online}
+          of={e.cameras.total}
+          tone={e.cameras.offline ? "warning" : e.cameras.online ? "success" : "default"}
+          hint={e.cameras.total ? `${e.cameras.offline} offline${e.cameras.unknown ? ` · ${e.cameras.unknown} unknown` : ""} · on ${plural(connected, "connected recorder")}` : "No cameras linked yet"}
+          icon={<Camera className="h-4 w-4" />}
+          href="/health"
+          segments={[
+            { label: "Online", value: e.cameras.online, color: "var(--chart-online)" },
+            { label: "Offline", value: e.cameras.offline, color: "var(--chart-offline)" },
+            { label: "Unknown", value: e.cameras.unknown, color: "var(--chart-unknown)" },
+          ]}
+        />
+        <KpiTile
+          label="Open incidents"
+          value={inc.available ? openTotal : "—"}
+          tone={openTotal ? "danger" : "success"}
+          hint={inc.available ? (openTotal ? `${plural(inc.openRecorders, "recorder")} · ${plural(inc.openCameras, "camera")} down now` : "Nothing is down right now") : "Downtime log not available yet"}
+          icon={<Activity className="h-4 w-4" />}
+          href={reportsHref}
+        />
+        <KpiTile
+          label="Downtime, last 24h"
+          value={inc.available ? formatDuration(inc.cameraDowntime24h) : "—"}
+          tone={inc.cameraDowntime24h || inc.recorderDowntime24h ? "warning" : "default"}
+          hint={inc.available ? `Camera time · ${plural(inc.incidents24h, "incident")} · recorders ${formatDuration(inc.recorderDowntime24h)}` : "Downtime log not available yet"}
+          icon={<Timer className="h-4 w-4" />}
+          href={reportsHref}
+        />
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-5">
+        <div className="xl:col-span-3">
+          <OemCoverage rows={e.coverage} />
+        </div>
+        <div className="xl:col-span-2">
+          <RequirementReadiness items={e.readiness} />
+        </div>
+      </div>
+
+      <Card className="mt-4">
+        <CardHeader
+          title="Recent incidents"
+          description="Last 10 outages from the downtime log. Ongoing ones are highlighted with their running duration."
+          action={
+            reportsHref ? (
+              <Link href={reportsHref} className="text-sm text-accent hover:underline">
+                Downtime reports
+              </Link>
+            ) : null
+          }
+        />
+        <CardBody>
+          {!inc.available ? (
+            <EmptyState icon={<Clock className="h-5 w-5" />} title="Downtime log not available yet" description="The incident tables are created by the next database migration. Status changes are still recorded below." className="py-8" />
+          ) : e.recentIncidents.length === 0 ? (
+            <p className="flex items-center gap-2 text-sm text-muted">
+              <CheckCircle2 className="h-4 w-4 text-success" /> No outages recorded on your connected recorders and cameras.
+              {r.PENDING + r.CLOUD > 0 ? <span className="text-faint">Recorders awaiting connectivity are not monitored, so they never raise incidents.</span> : null}
+            </p>
+          ) : (
+            <IncidentList items={e.recentIncidents} />
+          )}
+        </CardBody>
+      </Card>
+    </section>
+  );
+}
+
+function EstateSkeleton() {
+  return (
+    <section aria-busy="true" aria-label="Loading estate overview">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        {Array.from({ length: 5 }, (_, i) => (
+          <KpiTileSkeleton key={i} />
+        ))}
+      </div>
+      <div className="mt-4 grid gap-4 xl:grid-cols-5">
+        <PanelSkeleton rows={5} className="xl:col-span-3" />
+        <PanelSkeleton rows={5} className="xl:col-span-2" />
+      </div>
+      <PanelSkeleton rows={3} className="mt-4" />
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Operations: availability, camera status, connected recorders, sites, events
+// ---------------------------------------------------------------------------
+
+async function OperationsSection({ user }: { user: SessionUser }) {
+  const d = await loadDashboard(user);
+  const c = d.cameras;
+
+  return (
+    <section aria-label="Operations" className="mt-4">
       {!d.streaming.reachable ? (
         <Banner tone="danger" icon={<WifiOff className="h-4 w-4" />} title="Streaming server unreachable" text="Live view and playback are paused. Camera and recorder health still come from the recorders. Start it with npm run dev (or npm run mediamtx on its own)." />
       ) : null}
 
-      {/* KPI row */}
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatTile
-          label="Cameras online"
-          value={
-            <>
-              {c.online}
-              <span className="text-lg font-normal text-faint"> / {c.enabled}</span>
-            </>
-          }
-          hint={`${c.offline} offline${c.unknown ? ` · ${c.unknown} unknown` : ""}${c.disabled ? ` · ${c.disabled} disabled` : ""}`}
-          tone={c.offline > 0 ? "warning" : "success"}
-          icon={<Camera className="h-5 w-5" />}
-        />
-        <StatTile
-          label="NVR / DVR online"
-          value={
-            <>
-              {r.online}
-              <span className="text-lg font-normal text-faint"> / {r.total}</span>
-            </>
-          }
-          hint={`${r.nvr} NVR · ${r.dvr} DVR${r.offline ? ` · ${r.offline} offline` : " · all reachable"}`}
-          tone={r.offline > 0 ? "danger" : "success"}
-          icon={<HardDrive className="h-5 w-5" />}
-        />
-        <StatTile
-          label="Camera availability (24h)"
-          value={d.availability.cameras24h == null ? "—" : `${d.availability.cameras24h}%`}
-          hint={onlineShare == null ? "No cameras yet" : `${onlineShare}% online right now`}
-          tone="accent"
-          icon={<CheckCircle2 className="h-5 w-5" />}
-        />
-        <StatTile
-          label="Recorder alerts"
-          value={alerts}
-          hint={alerts ? [r.offline && `${r.offline} offline`, r.diskIssues && `${r.diskIssues} disk`, r.clockIssues && `${r.clockIssues} clock`].filter(Boolean).join(" · ") : "Disks and clocks healthy"}
-          tone={alerts ? "danger" : "success"}
-          icon={<AlertTriangle className="h-5 w-5" />}
-        />
-      </div>
-
       {/* Trend + status mix */}
-      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+      <div className="grid gap-4 xl:grid-cols-3">
         <Card className="xl:col-span-2">
-          <CardHeader title="Availability, last 24 hours" description="Share of time cameras and recorders were online, per hour." />
+          <CardHeader
+            title="Availability, last 24 hours"
+            description={`Share of time cameras and connected recorders were online, per hour${d.availability.cameras24h != null ? ` · cameras ${d.availability.cameras24h}%` : ""}${d.availability.recorders24h != null ? ` · recorders ${d.availability.recorders24h}%` : ""}.`}
+          />
           <CardBody>
             <AvailabilityChart
               series={[
@@ -104,7 +240,15 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         </Card>
 
         <Card>
-          <CardHeader title="Camera status" description={`${c.total} cameras`} action={<Link href="/health" className="text-sm text-accent hover:underline">Details</Link>} />
+          <CardHeader
+            title="Camera status"
+            description={`${plural(c.total, "camera")}${pct(c.online, c.enabled) != null ? ` · ${pct(c.online, c.enabled)}% online now` : ""}`}
+            action={
+              <Link href="/health" className="text-sm text-accent hover:underline">
+                Details
+              </Link>
+            }
+          />
           <CardBody>
             <SegmentedBar
               parts={[
@@ -115,7 +259,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               ]}
             />
             <p className="mb-2 mt-5 text-[12px] font-semibold uppercase tracking-wide text-faint">Offline now</p>
-            {d.offlineCameras.length === 0 ? (
+            {c.enabled === 0 ? (
+              <p className="text-sm text-muted">No cameras linked yet.</p>
+            ) : d.offlineCameras.length === 0 ? (
               <p className="flex items-center gap-2 text-sm text-muted">
                 <CheckCircle2 className="h-4 w-4 text-success" /> Every enabled camera is online.
               </p>
@@ -141,12 +287,32 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         </Card>
       </div>
 
-      {/* Recorders */}
+      {/* Connected recorders */}
       <Card className="mt-4 overflow-hidden">
-        <CardHeader title="NVR / DVR status" description="Reachability, channels, disks and clock of every recorder." action={<Link href="/devices" className="text-sm text-accent hover:underline">Manage recorders</Link>} />
+        <CardHeader
+          title="NVR / DVR status"
+          description="Reachability, channels, disks and clock of every connected recorder."
+          action={
+            <div className="flex items-center gap-3">
+              {d.recorders.diskIssues ? <Badge tone="danger">{plural(d.recorders.diskIssues, "disk issue")}</Badge> : null}
+              {d.recorders.clockIssues ? <Badge tone="warning">{plural(d.recorders.clockIssues, "clock issue")}</Badge> : null}
+              <Link href="/devices" className="text-sm text-accent hover:underline">
+                Manage recorders
+              </Link>
+            </div>
+          }
+        />
         {d.recorderList.length === 0 ? (
           <CardBody>
-            <EmptyState icon={<HardDrive className="h-5 w-5" />} title="No recorders yet" description="Add an NVR or DVR on the Recorders page and import its channels." />
+            <EmptyState
+              icon={<HardDrive className="h-5 w-5" />}
+              title={d.awaitingConnectivity ? "No connected recorders yet" : "No recorders yet"}
+              description={
+                d.awaitingConnectivity
+                  ? `${plural(d.awaitingConnectivity, "recorder")} are registered but have no network path from the server yet.`
+                  : "Add an NVR or DVR on the Recorders page and import its channels."
+              }
+            />
           </CardBody>
         ) : (
           <Table>
@@ -176,9 +342,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                         {x.model ? ` · ${x.model}` : ""}
                       </p>
                     </TD>
-                    <TD>
-                      <StatusBadge status={x.status} enabled={x.isEnabled} />
-                    </TD>
+                    <TD>{x.linkState === "CHECKING" ? <ConnectionBadge state="CHECKING" /> : <StatusBadge status={x.status} enabled={x.isEnabled} />}</TD>
                     <TD className="min-w-44">
                       <div className="flex items-center gap-2">
                         <div className="h-1.5 w-24 overflow-hidden rounded-full bg-[var(--chart-offline-soft)]">
@@ -221,6 +385,17 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             </TBody>
           </Table>
         )}
+        {d.awaitingConnectivity > 0 ? (
+          <Link
+            href="/health#awaiting"
+            className="flex items-center gap-2 border-t border-border bg-surface-2/60 px-5 py-2.5 text-[13px] text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            <Network className="h-4 w-4 text-warning" />
+            <span>
+              <span className="font-semibold text-text">{plural(d.awaitingConnectivity, "more recorder")}</span> awaiting connectivity (pending network or cloud-only). They are listed, not monitored, and never alerted on.
+            </span>
+          </Link>
+        ) : null}
       </Card>
 
       {/* Sites + events */}
@@ -232,7 +407,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           </CardBody>
         </Card>
         <Card>
-          <CardHeader title="Recent status changes" action={<Link href="/health" className="text-sm text-accent hover:underline">Health</Link>} />
+          <CardHeader
+            title="Recent status changes"
+            action={
+              <Link href="/health" className="text-sm text-accent hover:underline">
+                Health
+              </Link>
+            }
+          />
           <CardBody>
             {d.events.length === 0 ? (
               <p className="text-sm text-muted">No status changes recorded yet.</p>
@@ -285,7 +467,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             </CardBody>
           </Card>
           <Card className="xl:col-span-2">
-            <CardHeader title="Latest activity" action={<Link href="/audit" className="text-sm text-accent hover:underline">Audit log</Link>} />
+            <CardHeader
+              title="Latest activity"
+              action={
+                <Link href="/audit" className="text-sm text-accent hover:underline">
+                  Audit log
+                </Link>
+              }
+            />
             <CardBody>
               {d.recentAudit.length === 0 ? (
                 <p className="text-sm text-muted">No activity recorded yet.</p>
@@ -309,9 +498,33 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           </Card>
         </div>
       ) : null}
-    </>
+    </section>
   );
 }
+
+function OperationsSkeleton() {
+  return (
+    <section aria-busy="true" aria-label="Loading operations" className="mt-4">
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Card className="xl:col-span-2">
+          <div className="px-5 pt-4 pb-3">
+            <div className="skeleton h-4 w-48" />
+            <div className="skeleton mt-2 h-3 w-72" />
+          </div>
+          <div className="px-5 pb-5">
+            <div className="skeleton h-56 w-full" />
+          </div>
+        </Card>
+        <PanelSkeleton rows={4} />
+      </div>
+      <PanelSkeleton rows={3} className="mt-4" />
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Small building blocks
+// ---------------------------------------------------------------------------
 
 function Banner({ tone, icon, title, text }: { tone: "danger" | "warning"; icon: React.ReactNode; title: string; text?: string }) {
   return (
@@ -362,10 +575,12 @@ function SegmentedBar({ parts }: { parts: Array<{ label: string; value: number; 
   );
 }
 
-/** Horizontal stacked bars per site (online / offline / unknown), worst first. */
+/** Horizontal stacked bars per site (online / offline / unknown), worst first. Sites without cameras are summarised. */
 function SiteBars({ sites }: { sites: DashboardSite[] }) {
   if (sites.length === 0) return <p className="text-sm text-muted">No sites assigned to you.</p>;
-  const max = Math.max(1, ...sites.map((s) => s.total));
+  const withCams = sites.filter((s) => s.total > 0);
+  const without = sites.length - withCams.length;
+  const max = Math.max(1, ...withCams.map((s) => s.total));
   const kindLabel = { STORE: "Store", CORPORATE: "Corporate", WAREHOUSE: "Warehouse" } as const;
   return (
     <div>
@@ -380,8 +595,9 @@ function SiteBars({ sites }: { sites: DashboardSite[] }) {
           <span className="inline-block h-2.5 w-2.5 rounded-sm bg-[var(--chart-unknown)]" /> Unknown
         </span>
       </div>
-      <ul className="space-y-3">
-        {sites.map((s) => (
+      {withCams.length === 0 ? <p className="text-sm text-muted">No cameras linked to any of your sites yet.</p> : null}
+      <ul className="max-h-[420px] space-y-3 overflow-y-auto pr-1">
+        {withCams.map((s) => (
           <li key={s.id}>
             <div className="mb-1 flex items-center justify-between gap-3 text-[13px]">
               <Link href={`/live?store=${s.id}`} className="inline-flex min-w-0 items-center gap-2 font-medium text-text hover:text-accent">
@@ -394,7 +610,6 @@ function SiteBars({ sites }: { sites: DashboardSite[] }) {
               </span>
             </div>
             <div className="flex h-3 gap-0.5" style={{ width: `${Math.max(6, (s.total / max) * 100)}%` }}>
-              {s.total === 0 ? <div className="h-full w-full rounded-sm bg-surface-2" title="No cameras" /> : null}
               {[
                 { v: s.online, c: "var(--chart-online)", l: "online" },
                 { v: s.offline, c: "var(--chart-offline)", l: "offline" },
@@ -408,6 +623,13 @@ function SiteBars({ sites }: { sites: DashboardSite[] }) {
           </li>
         ))}
       </ul>
+      {without > 0 ? (
+        <p className="mt-3 border-t border-border pt-3 text-[12px] text-faint">
+          <Link href="/stores" className="hover:text-accent">
+            {plural(without, "more location")} without linked cameras yet
+          </Link>
+        </p>
+      ) : null}
     </div>
   );
 }

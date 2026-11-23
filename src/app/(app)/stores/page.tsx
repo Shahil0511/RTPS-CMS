@@ -3,18 +3,24 @@ import { StoresTable } from "@/components/stores/stores-table";
 import { PageHeader } from "@/components/ui/page-header";
 import { can, rolesFor } from "@/lib/auth/rbac";
 import { requireUser } from "@/lib/auth/session";
-import { listStoresForUser } from "@/server/queries/stores";
+import { listStoreEstateForUser } from "@/server/queries/stores";
 
 export const metadata: Metadata = { title: "Stores" };
 export const dynamic = "force-dynamic";
 
 export default async function StoresPage() {
   const user = await requireUser(rolesFor("cameras.view"));
-  const stores = await listStoresForUser(user);
+  const stores = await listStoreEstateForUser(user);
+  const recorders = stores.reduce((a, s) => a + s.recorderCount, 0);
+  const live = stores.reduce((a, s) => a + (s.recorderStates.LIVE ?? 0), 0);
+
   return (
     <>
-      <PageHeader title="Stores" description="Centralised inventory of locations. Cameras and user access are organised by store." />
-      <StoresTable stores={stores.map((s) => ({ ...s, createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString() }))} canManage={can(user, "stores.manage")} />
+      <PageHeader
+        title="Stores & locations"
+        description={`Every store, warehouse and office with its recorders' make and connection state${recorders ? ` · ${live} of ${recorders} recorders live` : ""}. Recorders marked Pending network or Cloud-only are listed but not monitored.`}
+      />
+      <StoresTable stores={stores} canManage={can(user, "stores.manage")} />
     </>
   );
 }

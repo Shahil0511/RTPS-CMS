@@ -4,7 +4,7 @@ import { count, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db } from "@/db";
-import { cameras, SITE_KINDS, stores } from "@/db/schema";
+import { cameras, devices, SITE_KINDS, stores } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { requestMeta, requireUser } from "@/lib/auth/session";
 import { rolesFor } from "@/lib/auth/rbac";
@@ -24,6 +24,15 @@ const storeSchema = z.object({
   city: optionalText(80),
   region: optionalText(80),
   phone: optionalText(40),
+  /** Store mailbox: offered as an alert recipient for this location. Empty clears it. */
+  email: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .max(200)
+    .optional()
+    .transform((v) => (v ? v : null))
+    .refine((v) => v === null || z.email().safeParse(v).success, "Enter a valid email address"),
   timezone: z.string().trim().min(1).max(64).default("Asia/Kolkata"),
   notes: optionalText(1000),
   isActive: checkbox,
@@ -72,8 +81,12 @@ export async function deleteStoreAction(id: string): Promise<ActionState> {
   const user = await requireUser(rolesFor("stores.manage"));
   const current = await db.query.stores.findFirst({ where: eq(stores.id, id) });
   if (!current) return failure("Store not found.");
-  const [c] = await db.select({ n: count() }).from(cameras).where(eq(cameras.storeId, id));
-  if ((c?.n ?? 0) > 0) return failure(`Cannot delete: ${c?.n} camera(s) are still assigned to this store.`);
+  const [[c], [r]] = await Promise.all([
+    db.select({ n: count() }).from(cameras).where(eq(cameras.storeId, id)),
+    db.select({ n: count() }).from(devices).where(eq(devices.storeId, id)),
+  ]);
+  if ((c?.n ?? 0) > 0) return failure(`Cannot delete: ${c?.n} camera(s) are still assigned to this location.`);
+  if ((r?.n ?? 0) > 0) return failure(`Cannot delete: ${r?.n} recorder(s) are still assigned to this location. Delete or move them first.`);
 
   await db.delete(stores).where(eq(stores.id, id));
   const meta = await requestMeta();

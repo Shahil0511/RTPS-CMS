@@ -1,6 +1,7 @@
 import "server-only";
 import type { Device } from "@/db/schema";
 import { setDeviceInfoProvider, type DeviceInfo } from "@/lib/devices/health";
+import { isIsapiVendor } from "@/lib/vendors";
 import { getChannelCount, getClock, getDeviceInfo, getStorage, rememberDetectedOffset } from "./isapi";
 
 /** How often model/serial/disk facts are re-read from each recorder. */
@@ -11,7 +12,7 @@ const INFO_REFRESH_MS = 10 * 60 * 1000;
  * device health check for every ONLINE recorder; throttled per device.
  */
 async function hikvisionInfo(device: Device): Promise<DeviceInfo | null> {
-  if (device.vendor !== "hikvision" || device.kind === "CAMERA") return null;
+  if (!isIsapiVendor(device.vendor) || device.kind === "CAMERA") return null;
   if (device.infoCheckedAt && Date.now() - device.infoCheckedAt.getTime() < INFO_REFRESH_MS) return null;
 
   const [info, storage, clock, channels] = await Promise.allSettled([

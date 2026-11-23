@@ -18,6 +18,7 @@ export interface StoreFormValues {
   city?: string | null;
   region?: string | null;
   phone?: string | null;
+  email?: string | null;
   timezone?: string;
   notes?: string | null;
   isActive?: boolean;
@@ -67,6 +68,9 @@ export function StoreForm({ initial, onDone, onCancel }: { initial?: StoreFormVa
           <Input id="phone" name="phone" defaultValue={initial?.phone ?? ""} />
         </Field>
       </div>
+      <Field label="Store email" htmlFor="email" error={state.fieldErrors?.email} hint="Optional store mailbox; it can be added as an alert recipient for this location.">
+        <Input id="email" name="email" type="email" defaultValue={initial?.email ?? ""} maxLength={200} placeholder="store@example.com" />
+      </Field>
       <Field label="Timezone" htmlFor="timezone" error={state.fieldErrors?.timezone} hint="IANA name used for store-local times">
         <Input id="timezone" name="timezone" defaultValue={initial?.timezone ?? "Asia/Kolkata"} required />
       </Field>

@@ -5,6 +5,7 @@ import { cameras, devices, stores } from "@/db/schema";
 import { getChannels } from "@/lib/hikvision/isapi";
 import { hikvisionLivePath } from "@/lib/cameras/source";
 import { slugify } from "@/lib/rtsp";
+import { isIsapiVendor } from "@/lib/vendors";
 
 export interface ChannelImportResult {
   found: number;
@@ -22,7 +23,7 @@ export interface ChannelImportResult {
 export async function importDeviceChannels(deviceId: string, opts: { rename?: boolean } = {}): Promise<ChannelImportResult> {
   const device = await db.query.devices.findFirst({ where: eq(devices.id, deviceId) });
   if (!device) throw new Error("Recorder not found.");
-  if (device.vendor !== "hikvision") throw new Error("Channel import is only available for Hikvision-compatible recorders.");
+  if (!isIsapiVendor(device.vendor)) throw new Error("Channel import is only available for Hikvision-compatible recorders.");
   const site = await db.query.stores.findFirst({ where: eq(stores.id, device.storeId) });
   if (!site) throw new Error("Recorder site not found.");
 

@@ -3,7 +3,7 @@ import type { Permission } from "@/lib/auth/rbac";
 export interface NavItem {
   href: string;
   label: string;
-  icon: "dashboard" | "live" | "playback" | "health" | "stores" | "devices" | "cameras" | "users" | "audit" | "settings";
+  icon: "dashboard" | "live" | "playback" | "health" | "stores" | "devices" | "cameras" | "users" | "audit" | "settings" | "alerts" | "reports";
   permission?: Permission;
 }
 
@@ -15,6 +15,7 @@ export const NAV_SECTIONS: Array<{ title: string; items: NavItem[] }> = [
       { href: "/live", label: "Live View", icon: "live", permission: "live.view" },
       { href: "/playback", label: "Playback", icon: "playback", permission: "playback.view" },
       { href: "/health", label: "Health", icon: "health", permission: "health.view" },
+      { href: "/reports", label: "Downtime Reports", icon: "reports", permission: "reports.view" },
     ],
   },
   {
@@ -29,6 +30,7 @@ export const NAV_SECTIONS: Array<{ title: string; items: NavItem[] }> = [
   {
     title: "Govern",
     items: [
+      { href: "/alerts", label: "Alerts", icon: "alerts", permission: "alerts.manage" },
       { href: "/audit", label: "Audit Logs", icon: "audit", permission: "audit.view" },
       { href: "/settings", label: "System", icon: "settings", permission: "settings.view" },
     ],

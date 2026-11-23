@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { env } from "@/env";
 import { apiError, noStore } from "@/lib/api-utils";
 import { audit } from "@/lib/audit";
+import { rolesFor } from "@/lib/auth/rbac";
 import { requireApiUser, requestMeta } from "@/lib/auth/session";
 import { signStreamToken } from "@/lib/auth/stream-token";
 import { getCameraForUser } from "@/server/queries/cameras";
@@ -15,8 +16,9 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ cameraId: string }> }) {
   try {
-    const user = await requireApiUser();
+    const user = await requireApiUser(rolesFor("live.view"));
     const { cameraId } = await ctx.params;
+    // Enforces store AND camera-level assignment; unassigned cameras look like missing ones.
     const camera = await getCameraForUser(user, cameraId);
     if (!camera) return NextResponse.json({ error: "Camera not found" }, { status: 404 });
     if (!camera.isEnabled) return NextResponse.json({ error: "Camera is disabled" }, { status: 409 });

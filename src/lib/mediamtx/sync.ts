@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { cameras, type Camera, type Device } from "@/db/schema";
 import { env } from "@/env";
 import { loadDevicesFor, resolveSource, resolveSourceWith } from "@/lib/cameras/source";
+import { isConnectable } from "@/lib/vendors";
 import { mtx, type MtxPathConf } from "./client";
 
 /** Prefix of short-lived playback proxy paths (see lib/playback). Never reconciled as cameras. */
@@ -52,14 +53,22 @@ function normaliseDuration(v: string | undefined): number {
   return Math.round(total * 1000) / 1000;
 }
 
-function hasSource(camera: Camera, device: Device | null): boolean {
-  return Boolean(device?.host || camera.host);
+/**
+ * True when MediaMTX should hold a path for this camera. A recorder channel needs a
+ * connectable recorder (DIRECT/RELAY, has an address, enabled): recorders that are
+ * "Pending network" or "Cloud-only" get no path, so nothing pulls from (or alerts on)
+ * an address the server cannot reach. Standalone cameras need their own host.
+ */
+export function shouldStream(camera: Camera, device: Device | null): boolean {
+  if (!camera.isEnabled) return false;
+  if (device) return isConnectable(device);
+  return Boolean(camera.host);
 }
 
 /** Creates or updates a single camera path. */
 export async function syncCamera(camera: Camera): Promise<void> {
   const source = await resolveSource(camera);
-  if (!camera.isEnabled || !hasSource(camera, source.device) || (source.device && !source.device.isEnabled)) {
+  if (!shouldStream(camera, source.device)) {
     await mtx.deletePath(camera.pathName);
     return;
   }
@@ -97,7 +106,7 @@ export async function reconcileAll(): Promise<SyncReport> {
 
   for (const camera of all) {
     const device = camera.deviceId ? (deviceMap.get(camera.deviceId) ?? null) : null;
-    if (!camera.isEnabled || !hasSource(camera, device) || (device && !device.isEnabled)) continue;
+    if (!shouldStream(camera, device)) continue;
     wanted.add(camera.pathName);
     try {
       const desired = pathConfFor(camera, device);

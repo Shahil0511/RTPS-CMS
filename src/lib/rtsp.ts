@@ -111,7 +111,8 @@ export function parseCameraList(text: string): { cameras: ImportedCamera[]; erro
           continue;
         }
         seen.add(key);
-        const channel = /channels\/(\d+)/i.exec(parts.path)?.[1];
+        // Hikvision ".../channels/101" or Dahua/CP Plus "/cam/realmonitor?channel=1&subtype=0".
+        const channel = /channels\/(\d+)/i.exec(parts.path)?.[1] ?? /[?&]channel=(\d+)/i.exec(parts.path)?.[1];
         const name = pendingLabel ?? (channel ? `Channel ${channel}` : `Camera ${cameras.length + 1}`);
         cameras.push({ name, url: line, parts });
       } catch (e) {

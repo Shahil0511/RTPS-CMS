@@ -1,9 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { apiError } from "@/lib/api-utils";
 import { audit } from "@/lib/audit";
-import { can } from "@/lib/auth/rbac";
+import { rolesFor } from "@/lib/auth/rbac";
 import { requireApiUser, requestMeta } from "@/lib/auth/session";
 import { mediaMtxAuthHeaders, mtx } from "@/lib/mediamtx/client";
+import { VIEW_ONLY_CLIP_SECONDS } from "@/lib/playback/limits";
 import { getCameraForUser } from "@/server/queries/cameras";
 
 export const runtime = "nodejs";
@@ -15,25 +16,30 @@ const MAX_CLIP_SECONDS = 6 * 3600;
  * Streams a recording from the MediaMTX playback server to the browser.
  * ?start=ISO&duration=seconds[&format=mp4|fmp4][&download=1]
  * Range requests are forwarded so <video> seeking works.
+ * Without the download right the clip is always fragmented MP4 and at most
+ * VIEW_ONLY_CLIP_SECONDS long (the player chains windows), so viewing cannot be
+ * used to pull a full recording file.
  */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ cameraId: string }> }) {
   try {
-    const user = await requireApiUser();
+    const user = await requireApiUser(rolesFor("playback.view"));
     const { cameraId } = await ctx.params;
     const camera = await getCameraForUser(user, cameraId);
     if (!camera) return NextResponse.json({ error: "Camera not found" }, { status: 404 });
 
     const sp = req.nextUrl.searchParams;
     const start = new Date(sp.get("start") ?? "");
-    const duration = Number(sp.get("duration") ?? "0");
-    const format = sp.get("format") === "mp4" ? "mp4" : "fmp4";
+    const requested = Number(sp.get("duration") ?? "0");
+    const wantsMp4 = sp.get("format") === "mp4";
     const download = sp.get("download") === "1";
-    if (Number.isNaN(start.getTime()) || !Number.isFinite(duration) || duration <= 0 || duration > MAX_CLIP_SECONDS) {
+    if (Number.isNaN(start.getTime()) || !Number.isFinite(requested) || requested <= 0 || requested > MAX_CLIP_SECONDS) {
       return NextResponse.json({ error: "Invalid start/duration" }, { status: 400 });
     }
-    if (download && !can(user, "playback.export")) {
-      return NextResponse.json({ error: "Export not permitted for your role" }, { status: 403 });
+    if ((download || wantsMp4) && !user.canDownload) {
+      return NextResponse.json({ error: "Downloading footage is not enabled for your account. Ask an administrator to allow downloads." }, { status: 403 });
     }
+    const format = user.canDownload && wantsMp4 ? "mp4" : "fmp4";
+    const duration = user.canDownload ? requested : Math.min(requested, VIEW_ONLY_CLIP_SECONDS);
 
     const upstreamUrl = mtx.playbackGetUrl(camera.pathName, start, duration, format);
     const range = req.headers.get("range");

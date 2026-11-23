@@ -1,10 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { apiError, noStore } from "@/lib/api-utils";
 import { audit } from "@/lib/audit";
-import { rolesFor } from "@/lib/auth/rbac";
-import { requireApiUser, requestMeta } from "@/lib/auth/session";
+import { canAccessCamera, canAccessStore, rolesFor } from "@/lib/auth/rbac";
+import { maskSerial } from "@/components/health/connection-state";
+import { requireApiUser, requestMeta, type SessionUser } from "@/lib/auth/session";
 import { deviceUptimeFor } from "@/lib/devices/health";
-import { runHealthCheck, uptimeFor } from "@/lib/health/monitor";
+import { runHealthCheck, uptimeFor, type HealthRunResult } from "@/lib/health/monitor";
 import { listCamerasForUser } from "@/server/queries/cameras";
 import { listDevicesForUser } from "@/server/queries/devices";
 
@@ -47,7 +48,8 @@ export async function GET(req: NextRequest) {
           lastError: d.lastError,
           lastLatencyMs: d.lastLatencyMs,
           model: d.model,
-          serialNumber: d.serialNumber,
+          // Serials identify the hardware for warranty/support: only the last four characters leave the server.
+          serialNumber: maskSerial(d.serialNumber),
           firmware: d.firmware,
           storageStatus: d.storageStatus,
           cameraCount: d.cameraCount,
@@ -106,8 +108,45 @@ export async function POST() {
       },
       ...meta,
     });
-    return noStore(NextResponse.json(result));
+    return noStore(NextResponse.json(user.isAdmin ? result : await scopedResult(user, result)));
   } catch (e) {
     return apiError(e);
   }
+}
+
+/**
+ * The check itself covers the whole estate; a non-admin only gets back what they may see:
+ * transitions of their cameras/recorders and counts over their own scope.
+ */
+async function scopedResult(user: SessionUser, result: HealthRunResult): Promise<HealthRunResult> {
+  const [cams, devs] = await Promise.all([listCamerasForUser(user, {}), listDevicesForUser(user, {})]);
+  const visibleCams = new Map(cams.map((c) => [c.id, c]));
+  const visibleDevs = new Map(devs.map((d) => [d.id, d]));
+  const camOk = (id: string) => {
+    const c = visibleCams.get(id);
+    return Boolean(c && canAccessCamera(user, { id: c.id, storeId: c.store.id }));
+  };
+  const devOk = (id: string) => {
+    const d = visibleDevs.get(id);
+    return Boolean(d && canAccessStore(user, d.store.id));
+  };
+  const enabledCams = cams.filter((c) => c.isEnabled);
+  const count = <T extends { status: string }>(rows: T[], status: string) => rows.filter((r) => r.status === status).length;
+  return {
+    ...result,
+    total: enabledCams.length,
+    online: count(enabledCams, "ONLINE"),
+    offline: count(enabledCams, "OFFLINE"),
+    unknown: count(enabledCams, "UNKNOWN"),
+    transitions: result.transitions.filter((t) => camOk(t.cameraId)),
+    devicesTotal: devs.length,
+    devicesOnline: count(devs, "ONLINE"),
+    devicesOffline: count(devs, "OFFLINE"),
+    devicesSkipped: 0,
+    deviceTransitions: result.deviceTransitions.filter((t) => devOk(t.deviceId)),
+    // Estate-wide bookkeeping is not the caller's business.
+    incidentsOpened: 0,
+    incidentsClosed: 0,
+    alertEmailsQueued: 0,
+  };
 }

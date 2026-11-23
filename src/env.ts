@@ -4,6 +4,21 @@ import { z } from "zod";
  * Validated server-side environment. Imported only from server code.
  * Fails fast at boot with a readable message instead of failing later in a request.
  */
+/** Treats blank values (e.g. "SMTP_HOST=" in .env) as unset. */
+/** True for a timezone the runtime's Intl knows (an invalid one would otherwise break every alert email). */
+function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function emptyToUndefined(v: unknown): unknown {
+  return typeof v === "string" && v.trim() === "" ? undefined : v;
+}
+
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_URL: z.string().url().default("http://localhost:3000"),
@@ -65,6 +80,27 @@ const schema = z.object({
   ADMIN_PASSWORD: z.string().min(8).default("ChangeMe123!"),
   ADMIN_NAME: z.string().min(1).default("System Administrator"),
   SEED_CAMERA_FILE: z.string().optional(),
+
+  /** Outgoing mail for alerts and reports. All optional: without SMTP_HOST, emails are kept in the outbox as SKIPPED_NO_SMTP. */
+  SMTP_HOST: z.preprocess(emptyToUndefined, z.string().trim().min(1).optional()),
+  SMTP_PORT: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(65535).default(587)),
+  SMTP_SECURE: z
+    .string()
+    .default("false")
+    .transform((v) => v === "true" || v === "1" || v === "yes"),
+  SMTP_USER: z.preprocess(emptyToUndefined, z.string().optional()),
+  SMTP_PASS: z.preprocess(emptyToUndefined, z.string().optional()),
+  SMTP_FROM: z.preprocess(emptyToUndefined, z.string().trim().min(1).optional()),
+  /** Timezone used for alert timestamps and the daily report window. */
+  ALERT_TIMEZONE: z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .trim()
+      .min(1)
+      .default("Asia/Kolkata")
+      .refine(isValidTimeZone, { message: "must be an IANA timezone such as Asia/Kolkata (alert times and the daily report use it)" }),
+  ),
 });
 
 export type Env = z.infer<typeof schema>;

@@ -3,6 +3,25 @@ import { and, desc, eq, gte, inArray, lt } from "drizzle-orm";
 import { db } from "@/db";
 import { cameras, devices, deviceStatusEvents, type CameraStatus, type Device } from "@/db/schema";
 import { tcpProbe } from "@/lib/health/monitor";
+import { isConnectable } from "@/lib/vendors";
+
+/**
+ * Why the server does not probe a recorder, or null when it should.
+ * PENDING_NETWORK / CLOUD_ONLY / disabled / address-less recorders are listed but never
+ * probed, streamed from or alerted on: their status stays UNKNOWN with this reason.
+ */
+export function notMonitoredReason(device: Pick<Device, "connectionMode" | "host" | "isEnabled">): string | null {
+  if (!device.isEnabled) return "Recorder disabled";
+  if (isConnectable(device)) return null;
+  switch (device.connectionMode) {
+    case "PENDING_NETWORK":
+      return "Awaiting network route: the recorder is not reachable from the server yet";
+    case "CLOUD_ONLY":
+      return "Cloud-only: no supported API";
+    default:
+      return "No recorder address configured";
+  }
+}
 
 /** Extra facts a vendor integration can read off the recorder itself. */
 export interface DeviceInfo {
@@ -51,6 +70,8 @@ export interface DeviceHealthRunResult {
   online: number;
   offline: number;
   unknown: number;
+  /** Recorders not probed because they are disabled, pending a network route or cloud-only. */
+  skipped: number;
   transitions: Array<{ deviceId: string; name: string; from: CameraStatus; to: CameraStatus }>;
 }
 
@@ -65,7 +86,7 @@ const CONCURRENCY = 8;
 export async function runDeviceHealthCheck(): Promise<DeviceHealthRunResult> {
   const checkedAt = new Date();
   const all = await db.select().from(devices);
-  const result: DeviceHealthRunResult = { checkedAt, total: all.length, online: 0, offline: 0, unknown: 0, transitions: [] };
+  const result: DeviceHealthRunResult = { checkedAt, total: all.length, online: 0, offline: 0, unknown: 0, skipped: 0, transitions: [] };
 
   for (let i = 0; i < all.length; i += CONCURRENCY) {
     const batch = all.slice(i, i + CONCURRENCY);
@@ -81,9 +102,12 @@ async function checkDevice(device: Device, checkedAt: Date, result: DeviceHealth
   let latency: number | null = null;
   let info: DeviceInfo | null = null;
 
-  if (!device.isEnabled) {
+  const skipReason = notMonitoredReason(device);
+  if (skipReason) {
+    // Never probe: an empty host would hit localhost, and private store IPs are not routable from here.
     next = "UNKNOWN";
-    detail = "Recorder disabled";
+    detail = skipReason;
+    result.skipped += 1;
   } else {
     const [rtsp, http] = await Promise.all([tcpProbe(device.host, device.rtspPort), tcpProbe(device.host, device.httpPort)]);
     latency = rtsp.latencyMs ?? http.latencyMs;

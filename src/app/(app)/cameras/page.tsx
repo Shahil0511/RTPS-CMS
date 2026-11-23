@@ -6,7 +6,8 @@ import { env } from "@/env";
 import { can, rolesFor } from "@/lib/auth/rbac";
 import { requireUser } from "@/lib/auth/session";
 import { listCamerasForUser } from "@/server/queries/cameras";
-import { deviceOptionsForUser } from "@/server/queries/devices";
+import { deviceVendorId, recorderLinkState, vendorLabel } from "@/components/health/connection-state";
+import { deviceOptionsForUser, listDevicesForUser } from "@/server/queries/devices";
 import { storeOptionsForUser } from "@/server/queries/stores";
 
 export const metadata: Metadata = { title: "Cameras" };
@@ -15,11 +16,14 @@ export const dynamic = "force-dynamic";
 export default async function CamerasPage({ searchParams }: { searchParams: Promise<{ store?: string; device?: string; q?: string }> }) {
   const user = await requireUser(rolesFor("cameras.view"));
   const { store, device, q } = await searchParams;
-  const [cameras, stores, devices] = await Promise.all([
+  const [cameras, stores, devices, recorders] = await Promise.all([
     listCamerasForUser(user, { storeId: store ?? null, deviceId: device ?? null, search: q ?? null }),
     storeOptionsForUser(user),
     deviceOptionsForUser(user),
+    listDevicesForUser(user, { storeId: store ?? null }),
   ]);
+  // Vendor and connection state of each camera's parent recorder (store-scoped like the cameras).
+  const recorderInfo = new Map(recorders.map((d) => [d.id, { vendor: vendorLabel(deviceVendorId(d)), linkState: recorderLinkState(d) }]));
 
   return (
     <>
@@ -36,6 +40,8 @@ export default async function CamerasPage({ searchParams }: { searchParams: Prom
             description: c.description,
             deviceId: c.deviceId,
             deviceName: c.device?.name ?? null,
+            deviceVendor: c.deviceId ? (recorderInfo.get(c.deviceId)?.vendor ?? null) : null,
+            deviceLinkState: c.deviceId ? (recorderInfo.get(c.deviceId)?.linkState ?? null) : null,
             channel: c.channel,
             host: c.host,
             port: c.port,

@@ -5,10 +5,14 @@ import { rolesFor } from "@/lib/auth/rbac";
 import { requireApiUser, requestMeta } from "@/lib/auth/session";
 import { deviceClock, downloadRecording, searchRecordings } from "@/lib/hikvision/isapi";
 import { playbackContext } from "@/lib/playback/sessions";
+import { isIsapiVendor, vendorLabel } from "@/lib/vendors";
 import { getCameraForUser, getCameraInternal } from "@/server/queries/cameras";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const unsupportedVendor = (vendor: string) =>
+  NextResponse.json({ error: `Playback search/download not yet supported for ${vendorLabel(vendor)}` }, { status: 501 });
 
 /**
  * Streams one recorded file straight from the recorder to the browser
@@ -17,7 +21,11 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ cameraId: string }> }) {
   try {
-    const user = await requireApiUser(rolesFor("playback.export"));
+    const user = await requireApiUser(rolesFor("playback.view"));
+    // Per-user override (users.allow_download) or the role's "playback.export" right.
+    if (!user.canDownload) {
+      return NextResponse.json({ error: "Downloading footage is not enabled for your account. Ask an administrator to allow downloads." }, { status: 403 });
+    }
     const { cameraId } = await ctx.params;
     const visible = await getCameraForUser(user, cameraId);
     const camera = visible ? await getCameraInternal(cameraId) : null;
@@ -31,6 +39,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ cameraId: s
     }
 
     const pc = await playbackContext(camera);
+    // Recording search and clip download are Hikvision ISAPI calls: never send them (or their digest login) to other vendors.
+    if (!isIsapiVendor(pc.device.vendor)) return unsupportedVendor(pc.device.vendor);
     const clock = deviceClock(pc.device, pc.siteTimeZone);
     // Search a slightly wider window and pick the file that overlaps the request the most.
     const files = await searchRecordings(pc.device, pc.trackId, new Date(start.getTime() - 1000), new Date(end.getTime() + 1000), clock);

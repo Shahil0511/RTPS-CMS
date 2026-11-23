@@ -4,6 +4,8 @@ import { Camera, HardDrive, MonitorPlay, MoreHorizontal, Pencil, Plug, Plus, Ref
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
+import { ConnectionBadge } from "@/components/health/connection-badge";
+import type { LinkState } from "@/components/health/connection-state";
 import { Badge, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -27,6 +29,10 @@ export interface CameraRowData extends CameraFormValues {
   pathName: string;
   deviceId: string | null;
   deviceName: string | null;
+  /** Vendor label of the parent recorder (e.g. "CP Plus", "Tyco Holis"). */
+  deviceVendor?: string | null;
+  /** Connection state of the parent recorder; cameras of a pending/cloud-only recorder are not monitored. */
+  deviceLinkState?: LinkState | null;
   channel: number | null;
   host: string | null;
   port: number;
@@ -160,6 +166,7 @@ export function CamerasTable({
                 <TH>Camera</TH>
                 <TH>Store</TH>
                 <TH>Source</TH>
+                <TH>Vendor</TH>
                 <TH>Status</TH>
                 <TH>Recording</TH>
                 <TH>Checked</TH>
@@ -199,8 +206,15 @@ export function CamerasTable({
                       <span className="ml-1 text-[10px] uppercase">{c.transport}</span>
                     </p>
                   </TD>
+                  <TD className="text-[13px]">
+                    {c.deviceVendor ? <span className="text-text">{c.deviceVendor}</span> : <span className="text-faint">{c.deviceId ? "—" : "Standalone"}</span>}
+                  </TD>
                   <TD>
-                    <StatusBadge status={c.status} enabled={c.isEnabled} />
+                    {c.isEnabled && (c.deviceLinkState === "PENDING" || c.deviceLinkState === "CLOUD") ? (
+                      <ConnectionBadge state={c.deviceLinkState} />
+                    ) : (
+                      <StatusBadge status={c.status} enabled={c.isEnabled} />
+                    )}
                     {c.videoCodec ? <p className="mt-1 text-[11px] text-faint">{c.videoCodec}{c.resolution ? ` · ${c.resolution}` : ""}</p> : null}
                   </TD>
                   <TD>{c.recordEnabled ? <Badge tone="info">{c.retentionDays ? `${c.retentionDays}d` : "forever"}</Badge> : <Badge>Off</Badge>}</TD>

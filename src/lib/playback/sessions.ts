@@ -9,6 +9,8 @@ import { deviceClock, getClock, hasDetectedOffset, playbackRtspUrl, rememberDete
 import { devices } from "@/db/schema";
 import { mtx, type MtxPathConf } from "@/lib/mediamtx/client";
 import { PLAYBACK_PATH_PREFIX } from "@/lib/mediamtx/sync";
+import { isConnectable, isIsapiVendor, vendorLabel } from "@/lib/vendors";
+import { playbackRtspUrlFor } from "@/lib/vendors/adapters";
 
 /**
  * NVR playback without local storage. Each request creates a short-lived,
@@ -34,6 +36,8 @@ export interface PlaybackContext {
   camera: Camera;
   device: Device;
   trackId: number;
+  /** Channel number on the recorder (trackId = channel*100 + 1). */
+  channel: number;
   siteTimeZone: string;
 }
 
@@ -43,12 +47,15 @@ export async function playbackContext(camera: Camera): Promise<PlaybackContext> 
   const source = await resolveSource(camera);
   if (!source.device) throw new PlaybackError("This camera is not linked to a recorder (NVR/DVR). Link it on the Cameras page.");
   if (!source.device.isEnabled) throw new PlaybackError("The recorder for this camera is disabled.");
+  // Pending-network / cloud-only recorders (often private store-LAN addresses) must never be dialled
+  // with their stored credentials: the address may belong to something else on the server's network.
+  if (!isConnectable(source.device)) throw new PlaybackError("Recorder is not reachable from the server", 409);
   if (!source.trackId) throw new PlaybackError("The camera has no channel number on its recorder.");
   const site = await db.query.stores.findFirst({ where: eq(stores.id, camera.storeId), columns: { timezone: true } });
   let device = source.device;
   // First use before the background check has measured the recorder clock: measure it now.
   // Measure the recorder clock when drift is unknown or this process has not read its UTC offset yet (e.g. after a restart).
-  if (device.vendor === "hikvision" && (device.clockDriftSeconds == null || (device.utcOffsetMinutes == null && !hasDetectedOffset(device.id)))) {
+  if (isIsapiVendor(device.vendor) && (device.clockDriftSeconds == null || (device.utcOffsetMinutes == null && !hasDetectedOffset(device.id)))) {
     try {
       const clock = await getClock(device);
       rememberDetectedOffset(device.id, clock.offsetMinutes);
@@ -60,7 +67,7 @@ export async function playbackContext(camera: Camera): Promise<PlaybackContext> 
       // fall back to the site timezone and no drift
     }
   }
-  return { camera, device, trackId: source.trackId, siteTimeZone: site?.timezone ?? "Asia/Kolkata" };
+  return { camera, device, trackId: source.trackId, channel: source.channel ?? Math.floor(source.trackId / 100), siteTimeZone: site?.timezone ?? "Asia/Kolkata" };
 }
 
 export interface CreatedSession {
@@ -83,15 +90,20 @@ export async function createPlaybackSession(camera: Camera, userId: string, star
   if (end.getTime() - start.getTime() < 5_000) throw new PlaybackError("The playback window is too short.");
 
   const clock = deviceClock(ctx.device, ctx.siteTimeZone);
+  const isapi = isIsapiVendor(ctx.device.vendor);
+  // Hikvision/Tyco keep the exact ISAPI track URL; Dahua-family recorders (CP Plus) use /cam/playback.
+  const source = isapi ? playbackRtspUrl(ctx.device, ctx.trackId, start, end, clock) : playbackRtspUrlFor(ctx.device, ctx.channel, start, end, clock);
+  if (!source) throw new PlaybackError(`Recorder playback is not yet supported for ${vendorLabel(ctx.device.vendor)}.`, 501);
   const pathName = `${PLAYBACK_PATH_PREFIX}${randomBytes(8).toString("hex")}`;
   const conf: MtxPathConf = {
-    source: playbackRtspUrl(ctx.device, ctx.trackId, start, end, clock),
+    source,
     sourceOnDemand: true,
     sourceOnDemandStartTimeout: "25s",
     sourceOnDemandCloseAfter: "5s",
     rtspTransport: camera.transport === "udp" ? "udp" : "tcp",
     record: false,
-    ...(env.NVR_PLAYBACK_RANGE_HEADER ? { rtspRangeType: "clock" as const, rtspRangeStart: toDeviceTime(start, clock, "compact") } : {}),
+    // The Range: clock= header is part of the Hikvision playback spec only.
+    ...(isapi && env.NVR_PLAYBACK_RANGE_HEADER ? { rtspRangeType: "clock" as const, rtspRangeStart: toDeviceTime(start, clock, "compact") } : {}),
   };
 
   // Record the session first so the janitor never sees the new path as an orphan.
@@ -109,10 +121,14 @@ export async function createPlaybackSession(camera: Camera, userId: string, star
   return { id: row.id, pathName, startAt: start, endAt: end };
 }
 
+/**
+ * Closes a session. `userId` is the caller for non-admins (undefined = admin): a non-admin may only
+ * close their own session, and a session without an owner (its user was deleted) is admin-only.
+ */
 export async function closePlaybackSession(id: string, userId?: string): Promise<boolean> {
   const row = await db.query.playbackSessions.findFirst({ where: eq(playbackSessions.id, id) });
   if (!row || row.closedAt) return false;
-  if (userId && row.userId && row.userId !== userId) return false;
+  if (userId !== undefined && row.userId !== userId) return false;
   await mtx.deletePath(row.pathName).catch(() => undefined);
   await db.update(playbackSessions).set({ closedAt: new Date() }).where(eq(playbackSessions.id, id));
   return true;

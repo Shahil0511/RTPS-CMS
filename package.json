@@ -23,6 +23,7 @@
     "dev:all": "npm run dev",
     "recorder:add": "node --env-file=.env --conditions=react-server --import=tsx scripts/add-recorder.ts",
     "health:run": "node --env-file=.env --conditions=react-server --import=tsx scripts/health-check.ts",
+    "estate:import": "node --env-file-if-exists=.env --conditions=react-server --import=tsx scripts/import-stores.ts",
     "dev:clean": "node scripts/clean-dev.mjs && npm run dev"
   },
   "dependencies": {
@@ -32,6 +33,7 @@
     "jose": "^6.2.15",
     "lucide-react": "^1.70.0",
     "next": "16.4.5",
+    "nodemailer": "^10.6.1",
     "pg": "^8.23.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
@@ -41,6 +43,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.4",
     "@types/node": "^24.0.0",
+    "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.23.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

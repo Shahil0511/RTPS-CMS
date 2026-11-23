@@ -5,8 +5,9 @@ import { redirect } from "next/navigation";
 import { SignJWT } from "jose";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { users, userStores, type Role, type User } from "@/db/schema";
+import { cameras, userCameras, users, userStores, type Role, type User } from "@/db/schema";
 import { env, isProd } from "@/env";
+import { can } from "./rbac";
 import { SESSION_COOKIE, verifySessionToken } from "./session-edge";
 
 export { SESSION_COOKIE, verifySessionToken };
@@ -25,6 +26,18 @@ export interface SessionUser {
   /** Store ids this user may access. Empty array for ADMIN means "all". */
   storeIds: string[];
   isAdmin: boolean;
+  /**
+   * Camera-level restrictions: storeId -> camera ids the user may see in that
+   * store. Every store whose user_stores.camera_limited flag is set appears here
+   * (with its user_cameras grants, possibly an empty list = no cameras); a store
+   * in storeIds but absent from this record means "every camera of that store".
+   * Always empty for ADMIN.
+   */
+  cameraScope: Record<string, string[]>;
+  /** Per-user download override (null = role default). */
+  allowDownload: boolean | null;
+  /** Effective footage-download right: allowDownload ?? role permission "playback.export". */
+  canDownload: boolean;
 }
 
 export async function signSessionToken(user: Pick<User, "id" | "email" | "role" | "tokenVersion" | "mustChangePassword">): Promise<string> {
@@ -69,10 +82,26 @@ export async function loadSessionUser(userId: string, tokenVersion?: number): Pr
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user || !user.isActive) return null;
   if (tokenVersion !== undefined && user.tokenVersion !== tokenVersion) return null;
-  const assignments =
-    user.role === "ADMIN"
-      ? []
-      : await db.select({ storeId: userStores.storeId }).from(userStores).where(eq(userStores.userId, user.id));
+  const isAdmin = user.role === "ADMIN";
+  const [assignments, grants] = isAdmin
+    ? [[], []]
+    : await Promise.all([
+        db.select({ storeId: userStores.storeId, cameraLimited: userStores.cameraLimited }).from(userStores).where(eq(userStores.userId, user.id)),
+        db
+          .select({ cameraId: userCameras.cameraId, storeId: cameras.storeId })
+          .from(userCameras)
+          .innerJoin(cameras, eq(cameras.id, userCameras.cameraId))
+          .where(eq(userCameras.userId, user.id)),
+      ]);
+  const storeIds = assignments.map((a) => a.storeId);
+  const cameraScope: Record<string, string[]> = {};
+  for (const a of assignments) if (a.cameraLimited) cameraScope[a.storeId] = [];
+  for (const g of grants) {
+    // Grants only narrow a camera-limited store; elsewhere (including stores the
+    // user is not assigned to) they are ignored and never widen access.
+    cameraScope[g.storeId]?.push(g.cameraId);
+  }
+  const allowDownload = isAdmin ? null : (user.allowDownload ?? null);
   return {
     id: user.id,
     email: user.email,
@@ -80,8 +109,11 @@ export async function loadSessionUser(userId: string, tokenVersion?: number): Pr
     role: user.role,
     mustChangePassword: user.mustChangePassword,
     tokenVersion: user.tokenVersion,
-    storeIds: assignments.map((a) => a.storeId),
-    isAdmin: user.role === "ADMIN",
+    storeIds,
+    isAdmin,
+    cameraScope,
+    allowDownload,
+    canDownload: allowDownload ?? can({ role: user.role }, "playback.export"),
   };
 }
 

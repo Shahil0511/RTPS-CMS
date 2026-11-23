@@ -4,18 +4,18 @@ import { and, count, eq, ne } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db } from "@/db";
-import { cameras, devices, DEVICE_KINDS, stores } from "@/db/schema";
+import { cameras, CONNECTION_MODES, devices, DEVICE_KINDS, stores, type ConnectionMode } from "@/db/schema";
 import { audit } from "@/lib/audit";
-import { canAccessStore, rolesFor } from "@/lib/auth/rbac";
+import { canAccessStore, hasWholeStore, rolesFor, WHOLE_STORE_REQUIRED } from "@/lib/auth/rbac";
 import { requestMeta, requireUser, type SessionUser } from "@/lib/auth/session";
 import { encryptSecret } from "@/lib/crypto";
 import { tcpProbe } from "@/lib/health/monitor";
 import { importDeviceChannels } from "@/lib/devices/channels";
 import { syncCamera, syncDeviceCameras } from "@/lib/mediamtx/sync";
+import { CONNECTION_MODE_LABELS, DEVICE_VENDOR_VALUES, hostOptionalFor, isConnectable, protocolFamilyOf, validateRtspTemplate, withRtspTemplate } from "@/lib/vendors";
 import { checkbox, failure, optionalText, parseForm, success, type ActionState } from "../action-utils";
 
-export const DEVICE_VENDORS = ["hikvision", "generic"] as const;
-export type DeviceVendor = (typeof DEVICE_VENDORS)[number];
+// Vendor values live in lib/vendors (DEVICE_VENDOR_VALUES): a "use server" file may only export async functions.
 
 const port = (fallback: number) =>
   z
@@ -23,34 +23,61 @@ const port = (fallback: number) =>
     .optional()
     .transform((v) => (v === "" || v === undefined ? fallback : v));
 
-const deviceSchema = z.object({
-  storeId: z.string().uuid("Select a site"),
-  name: z.string().trim().min(2, "Name is required").max(80),
-  kind: z.enum(DEVICE_KINDS).default("NVR"),
-  vendor: z.enum(DEVICE_VENDORS).default("hikvision"),
-  host: z
-    .string()
-    .trim()
-    .min(1, "Host is required")
-    .max(253)
-    .regex(/^[A-Za-z0-9.-]+$/, "Host must be an IP address or hostname"),
-  rtspPort: port(554),
-  httpPort: port(80),
-  httpsEnabled: checkbox,
-  username: optionalText(100),
-  password: z.string().max(200).optional().default(""),
-  channelCount: z
-    .union([z.coerce.number().int().min(1, "Channels must be 1-512").max(512, "Channels must be 1-512"), z.literal("")])
-    .optional()
-    .transform((v) => (v === "" || v === undefined ? null : v)),
-  notes: optionalText(1000),
-  isEnabled: checkbox,
-  timeMode: z.enum(["local", "utc"]).default("local"),
-  utcOffsetMinutes: z
-    .union([z.coerce.number().int().min(-720, "Offset must be between -720 and 840").max(840, "Offset must be between -720 and 840"), z.literal("")])
-    .optional()
-    .transform((v) => (v === "" || v === undefined ? null : v)),
-});
+const deviceSchema = z
+  .object({
+    storeId: z.string().uuid("Select a site"),
+    name: z.string().trim().min(2, "Name is required").max(80),
+    kind: z.enum(DEVICE_KINDS).default("NVR"),
+    vendor: z.enum(DEVICE_VENDOR_VALUES, { message: "Select a vendor" }).default("hikvision"),
+    /** "" = keep the current mode (edit form opened without one) or DIRECT on create. */
+    connectionMode: z.union([z.enum(CONNECTION_MODES), z.literal("")]).optional().default(""),
+    host: z
+      .string()
+      .trim()
+      .max(253)
+      .optional()
+      .default("")
+      .refine((v) => v === "" || /^[A-Za-z0-9.-]+$/.test(v), "Host must be an IP address or hostname"),
+    rtspPort: port(554),
+    httpPort: port(80),
+    httpsEnabled: checkbox,
+    username: optionalText(100),
+    password: z.string().max(200).optional().default(""),
+    /** Present when the form rendered the cloud fields; otherwise the stored values are kept. */
+    cloudFields: z.string().optional(),
+    cloudPlatform: optionalText(60),
+    /** Login identifier or device serial on the vendor cloud. Never a password. */
+    cloudAccount: optionalText(120),
+    rtspTemplate: z
+      .string()
+      .trim()
+      .max(300)
+      .optional()
+      .default("")
+      .superRefine((v, ctx) => {
+        const error = validateRtspTemplate(v);
+        if (error) ctx.addIssue({ code: "custom", message: error });
+      }),
+    channelCount: z
+      .union([z.coerce.number().int().min(1, "Channels must be 1-512").max(512, "Channels must be 1-512"), z.literal("")])
+      .optional()
+      .transform((v) => (v === "" || v === undefined ? null : v)),
+    notes: optionalText(1000),
+    isEnabled: checkbox,
+    timeMode: z.enum(["local", "utc"]).default("local"),
+    utcOffsetMinutes: z
+      .union([z.coerce.number().int().min(-720, "Offset must be between -720 and 840").max(840, "Offset must be between -720 and 840"), z.literal("")])
+      .optional()
+      .transform((v) => (v === "" || v === undefined ? null : v)),
+  })
+  .superRefine((d, ctx) => {
+    // Pending-network and cloud-only recorders may not have a known address yet.
+    if (!d.host && d.connectionMode !== "" && !hostOptionalFor(d.connectionMode)) {
+      ctx.addIssue({ code: "custom", path: ["host"], message: "Host is required for a live recorder (or choose Pending network / Cloud-only)" });
+    }
+  });
+
+type DeviceInput = z.infer<typeof deviceSchema>;
 
 function revalidate() {
   revalidatePath("/devices");
@@ -63,15 +90,39 @@ async function assertStoreAccess(user: SessionUser, storeId: string) {
   const store = await db.query.stores.findFirst({ where: eq(stores.id, storeId) });
   if (!store) throw new Error("Site not found.");
   if (!canAccessStore(user, store.id)) throw new Error("You do not have access to this site.");
+  // Recorders carry every channel of the site: only users who see the whole site may change them.
+  if (!hasWholeStore(user, store.id)) throw new Error(WHOLE_STORE_REQUIRED);
   return store;
 }
 
-/** The (host, rtspPort) pair is unique: two recorders cannot share an RTSP endpoint. */
-async function assertEndpointFree(host: string, rtspPort: number, excludeId?: string): Promise<void> {
-  const clash = await db.query.devices.findFirst({
-    where: excludeId ? and(eq(devices.host, host), eq(devices.rtspPort, rtspPort), ne(devices.id, excludeId)) : and(eq(devices.host, host), eq(devices.rtspPort, rtspPort)),
-  });
-  if (clash) throw new Error(`Another recorder (${clash.name}) already uses ${host}:${rtspPort}.`);
+/** Access check for changing an existing recorder: the store and every camera in it. */
+function wholeStoreError(user: SessionUser, storeId: string): string | null {
+  if (!canAccessStore(user, storeId)) return "You do not have access to this recorder.";
+  if (!hasWholeStore(user, storeId)) return WHOLE_STORE_REQUIRED;
+  return null;
+}
+
+/**
+ * (store, host, rtspPort) is unique: store LANs reuse 192.168.1.x, so the same
+ * address may exist once per store. Recorders without an address (host "") also
+ * count, because the database index treats "" like any other value.
+ */
+async function assertEndpointFree(storeId: string, host: string, rtspPort: number, excludeId?: string): Promise<void> {
+  const same = and(eq(devices.storeId, storeId), eq(devices.host, host), eq(devices.rtspPort, rtspPort));
+  const clash = await db.query.devices.findFirst({ where: excludeId ? and(same, ne(devices.id, excludeId)) : same });
+  if (!clash) return;
+  if (!host) throw new Error(`Another recorder at this site (${clash.name}) has no address yet on RTSP port ${rtspPort}. Give one of them its address, or use a different RTSP port.`);
+  throw new Error(`Another recorder at this site (${clash.name}) already uses ${host}:${rtspPort}.`);
+}
+
+/** Notes plus the RTSP template marker line, which only template-family vendors use. */
+function notesFor(d: DeviceInput): string | null {
+  const template = protocolFamilyOf(d.vendor) === "template" ? d.rtspTemplate : "";
+  return withRtspTemplate(d.notes, template);
+}
+
+function modeLabel(mode: string): string {
+  return CONNECTION_MODE_LABELS[mode as ConnectionMode]?.label ?? mode;
 }
 
 async function trySync(deviceId: string): Promise<string | null> {
@@ -90,7 +141,11 @@ export async function createDeviceAction(_prev: ActionState, formData: FormData)
   const d = parsed.data;
   try {
     const store = await assertStoreAccess(user, d.storeId);
-    await assertEndpointFree(d.host, d.rtspPort);
+    const connectionMode: ConnectionMode = d.connectionMode || "DIRECT";
+    if (!d.host && !hostOptionalFor(connectionMode)) {
+      return { ok: false, error: "Host is required for a live recorder.", fieldErrors: { host: ["Required for Live / Live (relay)"] } };
+    }
+    await assertEndpointFree(d.storeId, d.host, d.rtspPort);
     const [row] = await db
       .insert(devices)
       .values({
@@ -98,6 +153,9 @@ export async function createDeviceAction(_prev: ActionState, formData: FormData)
         name: d.name,
         kind: d.kind,
         vendor: d.vendor,
+        connectionMode,
+        cloudPlatform: d.cloudPlatform,
+        cloudAccount: d.cloudAccount,
         host: d.host,
         rtspPort: d.rtspPort,
         httpPort: d.httpPort,
@@ -107,7 +165,7 @@ export async function createDeviceAction(_prev: ActionState, formData: FormData)
         channelCount: d.channelCount,
         timeMode: d.timeMode,
         utcOffsetMinutes: d.utcOffsetMinutes,
-        notes: d.notes,
+        notes: notesFor(d),
         isEnabled: d.isEnabled,
       })
       .returning();
@@ -119,7 +177,7 @@ export async function createDeviceAction(_prev: ActionState, formData: FormData)
       entityType: "device",
       entityId: row.id,
       entityLabel: row.name,
-      details: { store: store.code, kind: d.kind, vendor: d.vendor, host: d.host, rtspPort: d.rtspPort, httpPort: d.httpPort, channelCount: d.channelCount },
+      details: { store: store.code, kind: d.kind, vendor: d.vendor, connectionMode, cloudPlatform: d.cloudPlatform, host: d.host, rtspPort: d.rtspPort, httpPort: d.httpPort, channelCount: d.channelCount },
       ...meta,
     });
     const warning = await trySync(row.id);
@@ -139,9 +197,14 @@ export async function updateDeviceAction(_prev: ActionState, formData: FormData)
   try {
     const current = await db.query.devices.findFirst({ where: eq(devices.id, id) });
     if (!current) return failure("Recorder not found.");
-    if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this recorder.");
+    const denied = wholeStoreError(user, current.storeId);
+    if (denied) return failure(denied);
     const store = await assertStoreAccess(user, d.storeId);
-    await assertEndpointFree(d.host, d.rtspPort, id);
+    const connectionMode: ConnectionMode = d.connectionMode || current.connectionMode;
+    if (!d.host && !hostOptionalFor(connectionMode)) {
+      return { ok: false, error: "Host is required for a live recorder.", fieldErrors: { host: ["Required for Live / Live (relay)"] } };
+    }
+    await assertEndpointFree(d.storeId, d.host, d.rtspPort, id);
 
     // The stored password must never be sent to an address other than the one it was saved for.
     const endpointChanged = current.host !== d.host || current.httpPort !== d.httpPort || current.rtspPort !== d.rtspPort || current.httpsEnabled !== d.httpsEnabled;
@@ -156,6 +219,8 @@ export async function updateDeviceAction(_prev: ActionState, formData: FormData)
         name: d.name,
         kind: d.kind,
         vendor: d.vendor,
+        connectionMode,
+        ...(d.cloudFields ? { cloudPlatform: d.cloudPlatform, cloudAccount: d.cloudAccount } : {}),
         host: d.host,
         rtspPort: d.rtspPort,
         httpPort: d.httpPort,
@@ -165,7 +230,7 @@ export async function updateDeviceAction(_prev: ActionState, formData: FormData)
         channelCount: d.channelCount,
         timeMode: d.timeMode,
         utcOffsetMinutes: d.utcOffsetMinutes,
-        notes: d.notes,
+        notes: notesFor(d),
         isEnabled: d.isEnabled,
       })
       .where(eq(devices.id, id))
@@ -184,7 +249,19 @@ export async function updateDeviceAction(_prev: ActionState, formData: FormData)
       entityType: "device",
       entityId: id,
       entityLabel: row.name,
-      details: { store: store.code, kind: d.kind, vendor: d.vendor, host: d.host, rtspPort: d.rtspPort, httpPort: d.httpPort, enabled: d.isEnabled, channelCount: d.channelCount, passwordChanged: Boolean(d.password) },
+      details: {
+        store: store.code,
+        kind: d.kind,
+        vendor: d.vendor,
+        connectionMode,
+        ...(connectionMode !== current.connectionMode ? { previousConnectionMode: current.connectionMode } : {}),
+        host: d.host,
+        rtspPort: d.rtspPort,
+        httpPort: d.httpPort,
+        enabled: d.isEnabled,
+        channelCount: d.channelCount,
+        passwordChanged: Boolean(d.password),
+      },
       ...meta,
     });
     const warning = await trySync(id);
@@ -204,7 +281,8 @@ export async function deleteDeviceAction(id: string, formData?: FormData): Promi
   const user = await requireUser(rolesFor("devices.manage"));
   const current = await db.query.devices.findFirst({ where: eq(devices.id, id) });
   if (!current) return failure("Recorder not found.");
-  if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this recorder.");
+  const denied = wholeStoreError(user, current.storeId);
+  if (denied) return failure(denied);
 
   const unlink = checkbox.parse(formData?.get("unlinkCameras") ?? undefined);
   const [c] = await db.select({ n: count() }).from(cameras).where(eq(cameras.deviceId, id));
@@ -222,7 +300,7 @@ export async function deleteDeviceAction(id: string, formData?: FormData): Promi
     entityType: "device",
     entityId: id,
     entityLabel: current.name,
-    details: { host: current.host, rtspPort: current.rtspPort, unlinkedCameras: linked },
+    details: { host: current.host, rtspPort: current.rtspPort, connectionMode: current.connectionMode, unlinkedCameras: linked },
     ...meta,
   });
   // Unlinked channels have no source any more; drop their stream paths.
@@ -244,12 +322,18 @@ export interface DeviceTestResult extends Record<string, unknown> {
   latencyMs: number | null;
 }
 
-/** TCP probe of the recorder's RTSP and HTTP ports. */
+/**
+ * TCP probe of the recorder's RTSP and HTTP ports (no login). Pending-network and
+ * cloud-only recorders can be probed by hand, but the result does not change their
+ * status: they are not monitored, so a failed test can never raise an alert.
+ */
 export async function testDeviceAction(id: string): Promise<ActionState> {
   const user = await requireUser(rolesFor("devices.manage"));
   const current = await db.query.devices.findFirst({ where: eq(devices.id, id) });
   if (!current) return failure("Recorder not found.");
   if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this recorder.");
+  if (!current.host) return failure(`This recorder has no address yet (${modeLabel(current.connectionMode)}). Add its IP or hostname first.`);
+  const monitored = isConnectable(current);
 
   const [rtsp, http] = await Promise.all([tcpProbe(current.host, current.rtspPort), tcpProbe(current.host, current.httpPort)]);
   const reachable = rtsp.ok || http.ok;
@@ -267,28 +351,70 @@ export async function testDeviceAction(id: string): Promise<ActionState> {
       ? `Reachable in ${latencyMs} ms: ${answered} answered`
       : `Partially reachable in ${latencyMs} ms: ${answered} answered, ${silent} did not`;
 
-  await db
-    .update(devices)
-    .set({
-      status: rtsp.ok ? "ONLINE" : "OFFLINE",
-      lastCheckedAt: new Date(),
-      lastOnlineAt: rtsp.ok ? new Date() : current.lastOnlineAt,
-      lastError: rtsp.ok ? null : summary,
-      lastLatencyMs: latencyMs,
-    })
-    .where(eq(devices.id, id));
+  if (monitored) {
+    await db
+      .update(devices)
+      .set({
+        status: rtsp.ok ? "ONLINE" : "OFFLINE",
+        lastCheckedAt: new Date(),
+        lastOnlineAt: rtsp.ok ? new Date() : current.lastOnlineAt,
+        lastError: rtsp.ok ? null : summary,
+        lastLatencyMs: latencyMs,
+      })
+      .where(eq(devices.id, id));
+  }
 
   const meta = await requestMeta();
-  await audit({ actor: user, action: "device.tested", entityType: "device", entityId: id, entityLabel: current.name, details: { host: current.host, rtspOk: rtsp.ok, httpOk: http.ok, latencyMs }, ...meta });
+  await audit({
+    actor: user,
+    action: "device.tested",
+    entityType: "device",
+    entityId: id,
+    entityLabel: current.name,
+    details: { host: current.host, connectionMode: current.connectionMode, rtspOk: rtsp.ok, httpOk: http.ok, latencyMs },
+    ...meta,
+  });
   revalidate();
-  return { ok: reachable, message: summary, error: reachable ? undefined : summary, data };
+  const message =
+    !monitored && reachable
+      ? `${summary}. Something answers at this address, but a private store IP can also answer from another LAN (another store, or the server's own network). Confirm it is the right recorder (for example by its model and serial on the recorder's web page) before switching its connection to "Live".`
+      : summary;
+  return { ok: reachable, message, error: reachable ? undefined : message, data };
+}
+
+/** Changes only how the server reaches a recorder (e.g. Pending network -> Live once a route exists). */
+export async function setDeviceConnectionModeAction(id: string, mode: ConnectionMode): Promise<ActionState> {
+  const user = await requireUser(rolesFor("devices.manage"));
+  const parsedMode = z.enum(CONNECTION_MODES).safeParse(mode);
+  if (!parsedMode.success) return failure("Unknown connection mode.");
+  const current = await db.query.devices.findFirst({ where: eq(devices.id, id) });
+  if (!current) return failure("Recorder not found.");
+  const denied = wholeStoreError(user, current.storeId);
+  if (denied) return failure(denied);
+  if (!current.host && !hostOptionalFor(parsedMode.data)) return failure("Add the recorder address before switching it to Live.");
+  if (current.connectionMode === parsedMode.data) return success("Connection unchanged");
+  await db.update(devices).set({ connectionMode: parsedMode.data }).where(eq(devices.id, id));
+  const meta = await requestMeta();
+  await audit({
+    actor: user,
+    action: "device.updated",
+    entityType: "device",
+    entityId: id,
+    entityLabel: current.name,
+    details: { connectionMode: parsedMode.data, previousConnectionMode: current.connectionMode },
+    ...meta,
+  });
+  const warning = await trySync(id);
+  revalidate();
+  return success(warning ?? `Connection set to ${modeLabel(parsedMode.data)}`);
 }
 
 export async function toggleDeviceEnabledAction(id: string, enabled: boolean): Promise<ActionState> {
   const user = await requireUser(rolesFor("devices.manage"));
   const current = await db.query.devices.findFirst({ where: eq(devices.id, id) });
   if (!current) return failure("Recorder not found.");
-  if (!canAccessStore(user, current.storeId)) return failure("You do not have access to this recorder.");
+  const denied = wholeStoreError(user, current.storeId);
+  if (denied) return failure(denied);
   await db.update(devices).set({ isEnabled: enabled }).where(eq(devices.id, id));
   const meta = await requestMeta();
   await audit({ actor: user, action: "device.updated", entityType: "device", entityId: id, entityLabel: current.name, details: { enabled }, ...meta });
@@ -303,6 +429,9 @@ export async function importDeviceChannelsAction(id: string, rename = false): Pr
   const device = await db.query.devices.findFirst({ where: eq(devices.id, id) });
   if (!device) return failure("Recorder not found.");
   if (!canAccessStore(user, device.storeId)) return failure("You do not have access to this recorder.");
+  // Renaming rewrites camera names from the recorder, including cameras the user was not granted.
+  if (rename && !hasWholeStore(user, device.storeId)) return failure(WHOLE_STORE_REQUIRED);
+  if (!isConnectable(device)) return failure(`Channels can only be read from a recorder the server can reach. This one is "${modeLabel(device.connectionMode)}".`);
   try {
     const r = await importDeviceChannels(id, { rename });
     const meta = await requestMeta();

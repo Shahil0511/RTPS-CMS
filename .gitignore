@@ -14,3 +14,7 @@ mediamtx/mediamtx.log
 *.log
 .DS_Store
 Thumbs.db
+
+# Real device credentials for store recorders - plaintext, never commit
+config/store-cameras.json
+link.txt

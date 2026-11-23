@@ -2,7 +2,7 @@ import "server-only";
 import { and, asc, count, eq, ilike, inArray, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { cameras, devices, stores, type Device, type Store } from "@/db/schema";
-import { storeScope } from "@/lib/auth/rbac";
+import { cameraScopeFilter, storeScope } from "@/lib/auth/rbac";
 import type { SessionUser } from "@/lib/auth/session";
 
 /** Device row without its secret: `passwordEnc` is replaced by the `hasPassword` flag. */
@@ -47,7 +47,9 @@ export async function listDevicesForUser(user: SessionUser, filter: DeviceFilter
     })
     .from(devices)
     .innerJoin(stores, eq(devices.storeId, stores.id))
-    .leftJoin(cameras, eq(cameras.deviceId, devices.id))
+    // Camera counts honour camera-level grants: a camera-limited user must not learn the size or
+    // state of channels they cannot see. Recorders themselves stay store-scoped.
+    .leftJoin(cameras, and(eq(cameras.deviceId, devices.id), cameraScopeFilter(user)))
     .where(conditions.length ? and(...conditions) : undefined)
     .groupBy(devices.id, stores.id)
     .orderBy(asc(stores.name), asc(devices.name));
